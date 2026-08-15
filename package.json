@@ -1,0 +1,51 @@
+{
+  "name": "llm-pricing",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Time-aware LLM token pricing: resolve a model name to a rate card and turn token counts into USD.",
+  "author": "Jannchie",
+  "license": "MIT",
+  "keywords": [
+    "llm",
+    "pricing",
+    "cost",
+    "tokens",
+    "openrouter",
+    "models.dev",
+    "anthropic",
+    "openai",
+    "deepseek"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "default": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --fix",
+    "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build",
+    "sync": "node scripts/sync-snapshot.mjs"
+  },
+  "devDependencies": {
+    "@jannchie/eslint-config": "^3.7.9",
+    "eslint": "^10.8.1",
+    "tsdown": "^0.22.14",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

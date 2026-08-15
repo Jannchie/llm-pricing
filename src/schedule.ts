@@ -1,0 +1,151 @@
+import type { PriceBasis, PricePeriod, PriceSchedule, Rates, TimeInput } from './types'
+import { weightedRates } from './rates'
+import { DAY_MS, HOUR_MS } from './types'
+
+export function toMs(value: TimeInput): number | null {
+  if (value === null || value === undefined) {
+    return null
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * A schedule is time-sensitive when *when* the tokens were spent changes
+ * what they cost: more than one effective period, or any peak window.
+ *
+ * Called once per priced row, so it stays allocation-free (no closure).
+ */
+export function isTimeSensitive(schedule: PriceSchedule): boolean {
+  if (schedule.periods.length > 1) {
+    return true
+  }
+  for (const period of schedule.periods) {
+    if (period.peak) {
+      return true
+    }
+  }
+  return false
+}
+
+export function periodAt(schedule: PriceSchedule, atMs: number): PricePeriod {
+  let current = schedule.periods[0]!
+  for (const period of schedule.periods) {
+    if (period.from <= atMs) {
+      current = period
+    }
+    else {
+      break
+    }
+  }
+  return current
+}
+
+export function isPeakHour(windows: Array<[number, number]>, atMs: number): boolean {
+  // Epoch ms floors to UTC midnight without any timezone lookup, which is
+  // exactly what the windows are defined against.
+  const hour = Math.floor((atMs - Math.floor(atMs / DAY_MS) * DAY_MS) / HOUR_MS)
+  return windows.some(([start, end]) => hour >= start && hour < end)
+}
+
+/** Exact rate card at one instant. */
+export function ratesAt(schedule: PriceSchedule, atMs: number): Rates {
+  const period = periodAt(schedule, atMs)
+  if (period.peak && isPeakHour(period.peak.windowsUtc, atMs)) {
+    return period.peak.rates
+  }
+  return period.rates
+}
+
+/**
+ * Milliseconds of one daily UTC window that fall in [epoch, x). Closed
+ * form: whole elapsed days each contribute the window's full length, and
+ * the partial last day contributes however much of it has elapsed.
+ */
+function dailyWindowMsUpTo(x: number, startMs: number, lengthMs: number): number {
+  const days = Math.floor(x / DAY_MS)
+  const intoDay = x - days * DAY_MS
+  return days * lengthMs + Math.min(Math.max(intoDay - startMs, 0), lengthMs)
+}
+
+/**
+ * Milliseconds of [from, to) that land inside a daily UTC peak window.
+ *
+ * O(windows) — differencing the two prefix sums beats walking the range a
+ * day at a time, which cost ~730 iterations for a year-long window.
+ */
+export function peakMsBetween(windows: Array<[number, number]>, fromMs: number, toMs: number): number {
+  let total = 0
+  for (const [start, end] of windows) {
+    const startMs = start * HOUR_MS
+    const lengthMs = (end - start) * HOUR_MS
+    total += dailyWindowMsUpTo(toMs, startMs, lengthMs) - dailyWindowMsUpTo(fromMs, startMs, lengthMs)
+  }
+  return total
+}
+
+/**
+ * Degraded path: the row is a sum over a whole window, so we no longer know
+ * which hours its tokens were spent in. Blend the schedule across the
+ * window by wall-clock time — i.e. assume usage is spread evenly. That is
+ * wrong for a user who only ever codes during peak hours, but it is
+ * bounded (never outside [off-peak, peak]) and it is the honest answer when
+ * the time axis has already been aggregated away. Callers that *do* have a
+ * timestamp pass `at` instead and get the exact rate.
+ */
+export function blendRates(schedule: PriceSchedule, fromMs: number, toMs: number): Rates {
+  // An unbounded (all-time) window would give ancient rates unbounded
+  // weight; a year of lookback is enough for any live schedule.
+  const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
+  if (!(toMs > start)) {
+    return ratesAt(schedule, start)
+  }
+  const parts: Array<{ rates: Rates, weight: number }> = []
+  const periods = schedule.periods
+  for (let i = 0; i < periods.length; i++) {
+    const period = periods[i]!
+    const next = periods[i + 1]
+    const segStart = Math.max(start, period.from)
+    const segEnd = Math.min(toMs, next ? next.from : Number.POSITIVE_INFINITY)
+    if (!(segEnd > segStart)) {
+      continue
+    }
+    const span = segEnd - segStart
+    if (period.peak) {
+      const peakMs = peakMsBetween(period.peak.windowsUtc, segStart, segEnd)
+      parts.push({ rates: period.peak.rates, weight: peakMs }, { rates: period.rates, weight: span - peakMs })
+    }
+    else {
+      parts.push({ rates: period.rates, weight: span })
+    }
+  }
+  // `parts` is never empty: the first period opens at -Infinity and
+  // `toMs > start` was checked above, so at least one segment has span.
+  return weightedRates(parts)
+}
+
+/**
+ * Resolve a schedule to the one flat rate card that applies, either at an
+ * instant (`at`) or averaged across a window. Both are ignored for models
+ * with a flat schedule, which is nearly all of them.
+ */
+export function ratesFor(
+  schedule: PriceSchedule,
+  at: TimeInput,
+  window: readonly [TimeInput, TimeInput] | undefined,
+  now: number = Date.now(),
+): { rates: Rates, basis: PriceBasis } {
+  if (!isTimeSensitive(schedule)) {
+    return { rates: schedule.periods[0]!.rates, basis: 'flat' }
+  }
+  const atMs = toMs(at)
+  if (atMs !== null) {
+    return { rates: ratesAt(schedule, atMs), basis: 'exact' }
+  }
+  const begin = (window ? toMs(window[0]) : null) ?? Number.NEGATIVE_INFINITY
+  const end = (window ? toMs(window[1]) : null) ?? now
+  return { rates: blendRates(schedule, begin, end), basis: 'blended' }
+}
