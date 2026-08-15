@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { PricingCatalog } from '../src/catalog'
 import { FALLBACK, FAST_MULTIPLIERS, SNAPSHOT_SYNCED_AT } from '../src/catalog/fallback'
 import { OVERRIDES } from '../src/catalog/overrides'
 
@@ -43,15 +44,22 @@ describe('bundled snapshot', () => {
     }
   })
 
-  it('derives a fast variant for every base model it declares', () => {
+  it('can derive a fast variant for every base model it declares', () => {
+    const catalog = new PricingCatalog({ sources: [] })
     for (const [multiplier, baseIds] of FAST_MULTIPLIERS) {
       for (const id of baseIds) {
         const base = FALLBACK[id]
-        const fast = FALLBACK[`${id}-fast`]
         expect(base, id).toBeDefined()
-        expect(fast, `${id}-fast`).toBeDefined()
-        expect(fast!.periods[0]!.rates.inputCostPerToken)
+        expect(catalog.getPrice(`${id}-fast`)?.inputCostPerToken)
           .toBeCloseTo(base!.periods[0]!.rates.inputCostPerToken * multiplier, 15)
+      }
+    }
+  })
+
+  it('keeps fast tiers out of the table so no reseller listing can win them', () => {
+    for (const [, baseIds] of FAST_MULTIPLIERS) {
+      for (const id of baseIds) {
+        expect(FALLBACK[`${id}-fast`], `${id}-fast`).toBeUndefined()
       }
     }
   })

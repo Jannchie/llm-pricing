@@ -9,7 +9,7 @@ export type {
   PricingCatalogState,
 } from './catalog'
 export { PricingCatalog } from './catalog'
-export { FALLBACK } from './catalog/fallback'
+export { FALLBACK, SNAPSHOT_SYNCED_AT, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 export type { ModelsDevResponse, ParseModelsDevOptions } from './catalog/modelsdev'
 export { DEFAULT_PROVIDER_PRIORITY, MODELS_DEV_URL, parseModelsDev } from './catalog/modelsdev'
 export type { OpenRouterModelsResponse } from './catalog/openrouter'
@@ -17,7 +17,7 @@ export { OPENROUTER_MODELS_URL, parseOpenRouterModels } from './catalog/openrout
 export { OVERRIDES } from './catalog/overrides'
 export type { TokenCounts } from './estimate'
 export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates } from './estimate'
-export { flatSchedule, scaleRates, scaleSchedule, weightedRates } from './rates'
+export { flatSchedule, mergeLiveQuote, ratesEqual, scaleRates, scaleSchedule, weightedRates } from './rates'
 export { dotted, pricingCandidates } from './resolve'
 export type { RowColumns } from './row'
 export { DEFAULT_ROW_COLUMNS, PRICE_ANCHOR_COLUMN } from './row'

@@ -39,13 +39,15 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --fix",
     "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build",
-    "sync": "node scripts/sync-snapshot.mjs"
+    "sync": "node scripts/sync-snapshot.mjs",
+    "example": "vite-node examples/tour.ts"
   },
   "devDependencies": {
     "@jannchie/eslint-config": "^3.7.9",
     "eslint": "^10.8.1",
     "tsdown": "^0.22.14",
     "typescript": "^5.7.0",
+    "vite-node": "^6.0.0",
     "vitest": "^3.0.0"
   }
 }

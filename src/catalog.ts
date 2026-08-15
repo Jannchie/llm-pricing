@@ -1,9 +1,10 @@
 import type { TokenCounts } from './estimate'
 import type { PricingSource } from './sources'
 import type { CostEstimate, ModelPrice, PriceSchedule, Rates, TimeInput } from './types'
-import { FALLBACK } from './catalog/fallback'
+import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
 import { costFromRates } from './estimate'
+import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
 import { isTimeSensitive, ratesFor } from './schedule'
 import { modelsDevSource } from './sources'
@@ -40,6 +41,13 @@ export interface PricingCatalogOptions {
   fallback?: Record<string, PriceSchedule>
   /** Called when a source fails to load. Defaults to `console.warn`. */
   onWarn?: (message: string, error: unknown) => void
+  /**
+   * The moment the bundled archive was last known to be accurate, as epoch
+   * ms. A live quote is grafted on as the period starting here, so history
+   * before it keeps the rates the archive recorded. Defaults to the bundled
+   * archive's sync date; override it when you supply your own `fallback`.
+   */
+  archiveObservedAt?: number
 }
 
 export interface PricingCatalogState {
@@ -68,6 +76,7 @@ export class PricingCatalog {
   private readonly overrides: Record<string, PriceSchedule>
   private readonly fallback: Record<string, PriceSchedule>
   private readonly onWarn: (message: string, error: unknown) => void
+  private readonly archiveObservedAt: number
 
   private loadedAt = 0
   private status: PricingCatalogState['status'] = 'missing'
@@ -89,6 +98,7 @@ export class PricingCatalog {
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.overrides = { ...OVERRIDES, ...options.overrides }
     this.fallback = { ...FALLBACK, ...options.fallback }
+    this.archiveObservedAt = options.archiveObservedAt ?? SNAPSHOT_SYNCED_AT_MS
     this.onWarn = options.onWarn ?? ((message, error) => {
       console.warn(`[llm-pricing] ${message}:`, error instanceof Error ? error.message : error)
     })
@@ -101,11 +111,41 @@ export class PricingCatalog {
    * query layer follows automatically.
    */
   get timeSensitiveSqlPatterns(): readonly string[] {
-    return [...new Set(
-      [...Object.values(this.overrides), ...Object.values(this.fallback)]
+    return [...new Set([
+      ...[...Object.values(this.overrides), ...Object.values(this.fallback)]
         .filter(schedule => isTimeSensitive(schedule))
         .flatMap(schedule => schedule.sqlMatch ?? []),
-    )]
+      ...this.livePatterns,
+    ])]
+  }
+
+  /**
+   * Patterns for models the *live* catalogue has repriced since the archive
+   * was synced — they are time-sensitive only once a source is loaded, so
+   * they cannot be derived from the static tables. Recomputed on each load.
+   *
+   * Looks each archive id up in the remote map directly rather than through
+   * `pricingCandidates`: both are keyed by the same catalogue ids, and a
+   * miss here only means the model blends across the request window instead
+   * of pricing exactly.
+   */
+  private livePatterns: string[] = []
+
+  private recomputeLivePatterns(): void {
+    const patterns = new Set<string>()
+    for (const [id, archived] of Object.entries(this.fallback)) {
+      const live = this.remote.get(id)
+      if (!live) {
+        continue
+      }
+      const merged = mergeLiveQuote(archived, live, this.archiveObservedAt, [`%${id}%`])
+      if (isTimeSensitive(merged)) {
+        for (const pattern of merged.sqlMatch ?? []) {
+          patterns.add(pattern)
+        }
+      }
+    }
+    this.livePatterns = [...patterns]
   }
 
   /**
@@ -158,6 +198,7 @@ export class PricingCatalog {
     }
     this.loadedAt = Date.now()
     this.resolved.clear()
+    this.recomputeLivePatterns()
   }
 
   state(): PricingCatalogState {
@@ -193,19 +234,40 @@ export class PricingCatalog {
         return override
       }
     }
+    // Fast tiers are derived from the base model rather than looked up: see
+    // FAST_BY_ID. This runs before any catalogue so a reseller's marked-up
+    // `-fast` listing cannot win.
+    for (const candidate of candidates) {
+      const fast = FAST_BY_ID[candidate]
+      if (fast) {
+        const base = this.getSchedule(fast.base)
+        return base ? scaleSchedule(base, fast.multiplier, 'Fast') : null
+      }
+    }
+    let live: PriceSchedule | null = null
     for (const candidate of candidates) {
       const fromRemote = this.remote.get(candidate)
       if (fromRemote) {
-        return fromRemote
+        live = fromRemote
+        break
       }
     }
+    let archived: PriceSchedule | null = null
+    let archivedId = ''
     for (const candidate of candidates) {
       const fallback = this.fallback[candidate]
       if (fallback) {
-        return fallback
+        archived = fallback
+        archivedId = candidate
+        break
       }
     }
-    return null
+    if (!live) {
+      return archived
+    }
+    // A live quote prices *now*, not the past. Graft it onto whatever
+    // history the archive has instead of letting one number cover all time.
+    return mergeLiveQuote(archived, live, this.archiveObservedAt, archivedId ? [`%${archivedId}%`] : undefined)
   }
 
   /**

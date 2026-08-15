@@ -1,41 +1,75 @@
-import type { PriceSchedule } from '../types'
-import { flatSchedule, scaleSchedule } from '../rates'
+import type { PricePeriod, PriceSchedule } from '../types'
+
 import snapshot from './snapshot.json'
 
-// The offline table, used when no remote source is reachable or none of
-// them lists a model.
+// The offline price archive, used when no remote source is reachable or
+// none of them lists a model.
 //
-// Its price rows are NOT hand-maintained: `snapshot.json` is generated from
+// Its rows are NOT hand-maintained: `snapshot.json` is generated from
 // models.dev by `pnpm sync`, filtered to first-party providers so a bare
 // model name resolves to the rate a user calling the vendor directly would
-// pay. The sync is append-only, which is what keeps retired-but-still-stored
-// model strings priced instead of silently costing $0.
+// pay. Each sync appends a period rather than overwriting, so a vendor
+// raising its rate does not re-price last month — see the script header.
 //
 // What IS hand-maintained here is the one thing no upstream publishes: the
 // fast/priority tier multipliers below.
 
-type SnapshotRow = [displayName: string, input: number, cacheWrite: number, cacheRead: number, output: number]
+type SnapshotPeriod = [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number]
+type SnapshotEntry = [displayName: string, periods: SnapshotPeriod[]]
+
+// The JSON's inferred type cannot express fixed-arity tuples; the shape is
+// guaranteed by the generator instead.
+const SNAPSHOT_MODELS = snapshot.models as unknown as Record<string, SnapshotEntry>
+
+/** When the bundled archive was last refreshed (YYYY-MM-DD). */
+export const SNAPSHOT_SYNCED_AT: string = snapshot.syncedAt
+
+/**
+ * The archive's last observation, as epoch ms. Anything a live source
+ * reports is newer than this and must not be applied before it — see
+ * `mergeLiveQuote`.
+ */
+export const SNAPSHOT_SYNCED_AT_MS: number = Date.parse(`${snapshot.syncedAt}T00:00:00Z`)
+
+function toPeriod([from, input, cacheWrite, cacheRead, output]: SnapshotPeriod): PricePeriod {
+  return {
+    from: from === null ? Number.NEGATIVE_INFINITY : Date.parse(`${from}T00:00:00Z`),
+    rates: {
+      inputCostPerToken: input / 1e6,
+      cacheCreationInputCostPerToken: cacheWrite / 1e6,
+      cacheReadInputCostPerToken: cacheRead / 1e6,
+      cachedInputCostPerToken: cacheRead / 1e6,
+      outputCostPerToken: output / 1e6,
+    },
+  }
+}
 
 const FALLBACK: Record<string, PriceSchedule> = {}
 
-// The JSON's inferred type is `(string | number)[]`, which cannot express a
-// fixed-arity tuple; the shape is guaranteed by the generator instead.
-const SNAPSHOT_MODELS = snapshot.models as unknown as Record<string, SnapshotRow>
-
-for (const [id, row] of Object.entries(SNAPSHOT_MODELS)) {
-  const [displayName, input, cacheWrite, cacheRead, output] = row
-  FALLBACK[id] = flatSchedule(displayName, input / 1e6, cacheRead / 1e6, output / 1e6, cacheWrite / 1e6)
+for (const [id, [displayName, periods]] of Object.entries(SNAPSHOT_MODELS)) {
+  FALLBACK[id] = {
+    displayName,
+    source: 'fallback',
+    periods: periods.map(toPeriod),
+    // A model that has actually been repriced needs its rows split by hour
+    // for exact pricing; one that never has stays flat and costs the query
+    // layer nothing. Deriving the pattern here rather than listing it keeps
+    // the SQL side in step with the archive automatically.
+    //
+    // `_` is a single-character wildcard in LIKE, so an id containing one
+    // over-matches. That only costs a few extra correctly-priced rows —
+    // the same trade the vendor-wide patterns in overrides.ts make.
+    sqlMatch: periods.length > 1 ? [`%${id}%`] : undefined,
+  }
 }
-
-/** When the bundled snapshot was last refreshed (YYYY-MM-DD). */
-export const SNAPSHOT_SYNCED_AT: string = snapshot.syncedAt
 
 // Fast / priority inference variants.
 //
 // No catalogue publishes these: OpenRouter lists no `gpt-5.x-fast` model at
 // all, models.dev has no fast tier, and Anthropic's fast variants vanish
 // from catalogues when they retire upstream. So the multipliers live here,
-// applied to whatever base model the snapshot provides.
+// applied to whatever base model the archive provides — including its
+// history, so a fast variant of a repriced model keeps the schedule.
 //
 // The multiplier is NOT constant: Opus 4.6/4.7 x6 ($30/$150), Opus 4.8 x2
 // ($10/$50, Anthropic's published fast-mode rate), gpt-5.5 x2.5, gpt-5.4 /
@@ -43,7 +77,7 @@ export const SNAPSHOT_SYNCED_AT: string = snapshot.syncedAt
 // as the house default, since upstream has not published a rate for them.
 // Sonnet and Haiku have no fast variant — do not synthesize one.
 //
-// Append-only, like the snapshot: never drop a row because upstream retired
+// Append-only, like the archive: never drop a row because upstream retired
 // the model, or its historical rows silently price at $0.
 const FAST_MULTIPLIERS: Array<[multiplier: number, baseIds: string[]]> = [
   [6, ['claude-opus-4-6', 'claude-opus-4-7']],
@@ -66,13 +100,24 @@ const FAST_MULTIPLIERS: Array<[multiplier: number, baseIds: string[]]> = [
   ]],
 ]
 
+/**
+ * `<id>-fast` -> the base id and its multiplier.
+ *
+ * Fast variants are derived when a model is *resolved*, not baked into the
+ * table, for two reasons. The multiplier then applies to whatever the base
+ * currently resolves to — including a live reprice — and it beats the
+ * reseller quotes that litter these ids upstream: no vendor publishes a
+ * first-party `-fast` model, so aggregators fill the gap with routers
+ * marking the real rate up 20%.
+ */
+const FAST_BY_ID: Record<string, { base: string, multiplier: number }> = {}
+
 for (const [multiplier, baseIds] of FAST_MULTIPLIERS) {
   for (const id of baseIds) {
-    const base = FALLBACK[id]
-    if (base) {
-      FALLBACK[`${id}-fast`] = scaleSchedule(base, multiplier, 'Fast')
-    }
+    FAST_BY_ID[`${id}-fast`] = { base: id, multiplier }
   }
 }
 
-export { FALLBACK, FAST_MULTIPLIERS }
+export { FALLBACK, FAST_BY_ID, FAST_MULTIPLIERS }
+
+export { scaleSchedule } from '../rates'

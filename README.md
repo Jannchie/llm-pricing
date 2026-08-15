@@ -35,7 +35,7 @@ Price data is **not** hand-maintained. Live catalogues are fetched at runtime, a
 | --- | --- | --- |
 | Overrides | hand-written, in-repo | only what no upstream publishes |
 | Live catalogue | [models.dev](https://models.dev/api.json) (default), optionally [OpenRouter](https://openrouter.ai/api/v1/models) | every 24h at runtime |
-| Snapshot | generated from models.dev by `pnpm sync` | committed; refresh when you feel like it |
+| Archive | generated from models.dev by `pnpm sync` | committed; each sync appends, never overwrites |
 
 ```ts
 import { modelsDevSource, openRouterSource, PricingCatalog } from 'llm-pricing'
@@ -47,7 +47,20 @@ const catalog = new PricingCatalog({ sources: [modelsDevSource(), openRouterSour
 const offline = new PricingCatalog({ sources: [] })
 ```
 
-Resolution order is always **overrides → sources in order → snapshot**. A source that fails to load never takes the catalogue down; the previous load keeps serving and `state().status` degrades to `stale`.
+Resolution order is **overrides → fast-tier derivation → live sources grafted onto the archive → archive**. A source that fails to load never takes the catalogue down; the previous load keeps serving and `state().status` degrades to `stale`.
+
+### Why the archive is an archive
+
+Every catalogue in existence publishes one number per model: what it costs *today*. Multiply that by last month's tokens and a vendor's price rise silently inflates last month's bill.
+
+So `pnpm sync` **appends** rather than overwrites. A model whose price changed carries both periods, and a live quote that disagrees with the archive is grafted on as a new period starting at the archive's sync date — the last moment the old rate is known to have been correct:
+
+```
+gpt-5.5   [null → 2026-08-15]  $5.00/MTok      ← archived
+          [2026-08-15 → now ]  $6.00/MTok      ← live quote, grafted on
+```
+
+Two things follow. An effective date is only as precise as your sync cadence — a change three weeks before a sync is dated at the sync. And the archive and the live source should quote on the **same basis**: with the default (both models.dev) a disagreement really is a change over time, but pointing the live source at OpenRouter while the archive came from models.dev turns every reseller-vs-first-party gap into a spurious "reprice".
 
 ### What stays hand-maintained, and why
 
@@ -114,8 +127,9 @@ for (const row of rows) {
 
 ```bash
 pnpm install
-pnpm test        # 98 tests, no network
-pnpm sync        # refresh src/catalog/snapshot.json from models.dev
+pnpm test        # 111 tests, no network
+pnpm example     # runnable tour of every feature — examples/tour.ts
+pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build
 ```
 
