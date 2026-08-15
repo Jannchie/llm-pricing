@@ -10,6 +10,7 @@ import { isTimeSensitive, ratesFor } from './schedule'
 import { modelsDevSource } from './sources'
 
 const DEFAULT_REFRESH_MS = 24 * 60 * 60 * 1000
+const DEFAULT_RETRY_MS = 5 * 60 * 1000
 
 export interface PricingCatalogOptions {
   /**
@@ -27,6 +28,17 @@ export interface PricingCatalogOptions {
   sources?: PricingSource[]
   /** How long a successful load stays fresh. Default: 24h. */
   refreshMs?: number
+  /**
+   * How long to wait before retrying after every source failed. Default:
+   * 5 minutes.
+   *
+   * Without this, `ensureLoaded()` on a per-request path re-attempts the
+   * full download on every request for as long as the upstream is down,
+   * adding its latency and bandwidth to each one. The bundled archive is
+   * answering those requests correctly in the meantime, so there is no
+   * urgency.
+   */
+  retryMs?: number
   /** Injected for tests and for runtimes with a non-global fetch. */
   fetch?: typeof globalThis.fetch
   /**
@@ -72,6 +84,7 @@ export type EstimateArgs = TokenCounts & {
 export class PricingCatalog {
   private readonly sources: PricingSource[]
   private readonly refreshMs: number
+  private readonly retryMs: number
   private readonly fetchImpl: typeof globalThis.fetch
   private readonly overrides: Record<string, PriceSchedule>
   private readonly fallback: Record<string, PriceSchedule>
@@ -79,6 +92,7 @@ export class PricingCatalog {
   private readonly archiveObservedAt: number
 
   private loadedAt = 0
+  private failedAt = 0
   private status: PricingCatalogState['status'] = 'missing'
   private sourceName = 'fallback'
   private remote = new Map<string, PriceSchedule>()
@@ -95,6 +109,7 @@ export class PricingCatalog {
   constructor(options: PricingCatalogOptions = {}) {
     this.sources = options.sources ?? [modelsDevSource()]
     this.refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS
+    this.retryMs = options.retryMs ?? DEFAULT_RETRY_MS
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.overrides = { ...OVERRIDES, ...options.overrides }
     this.fallback = { ...FALLBACK, ...options.fallback }
@@ -154,7 +169,13 @@ export class PricingCatalog {
    * concurrent loads.
    */
   ensureLoaded(): Promise<void> {
-    if (this.status === 'ready' && Date.now() - this.loadedAt < this.refreshMs) {
+    const now = Date.now()
+    if (this.status === 'ready' && now - this.loadedAt < this.refreshMs) {
+      return Promise.resolve()
+    }
+    // Back off after a total failure so a downed upstream cannot put its
+    // timeout in front of every request.
+    if (this.failedAt !== 0 && now - this.failedAt < this.retryMs) {
       return Promise.resolve()
     }
     this.inflight ??= this.load().finally(() => {
@@ -190,11 +211,13 @@ export class PricingCatalog {
       // degrades. With nothing loaded ever, we are on the fallback table.
       this.status = this.status === 'ready' ? 'stale' : 'missing'
       this.sourceName = 'fallback'
+      this.failedAt = Date.now()
     }
     else {
       this.remote = merged
       this.status = 'ready'
       this.sourceName = loaded.join('+')
+      this.failedAt = 0
     }
     this.loadedAt = Date.now()
     this.resolved.clear()

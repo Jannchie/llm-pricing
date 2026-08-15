@@ -155,6 +155,52 @@ describe('pricingcatalog loading', () => {
     expect(catalog.getPrice('claude-opus-5')?.inputCostPerToken).toBe(9e-6)
   })
 
+  it('backs off instead of re-fetching on every call while a source is down', async () => {
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 503 })) as unknown as typeof globalThis.fetch
+    const catalog = new PricingCatalog({
+      sources: [stubSource('remote', {})],
+      fetch: fetchImpl,
+      onWarn: () => {},
+    })
+    for (let i = 0; i < 5; i++) {
+      await catalog.ensureLoaded()
+    }
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    // The archive is answering correctly throughout.
+    expect(catalog.getPrice('claude-opus-5')?.source).toBe('fallback')
+  })
+
+  it('retries once the backoff window has passed', async () => {
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 503 })) as unknown as typeof globalThis.fetch
+    const catalog = new PricingCatalog({
+      sources: [stubSource('remote', {})],
+      retryMs: -1,
+      fetch: fetchImpl,
+      onWarn: () => {},
+    })
+    await catalog.ensureLoaded()
+    await catalog.ensureLoaded()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears the backoff after a source recovers', async () => {
+    let down = true
+    const fetchImpl = vi.fn(async () => new Response('{}', { status: down ? 503 : 200 })) as unknown as typeof globalThis.fetch
+    const catalog = new PricingCatalog({
+      sources: [stubSource('remote', { 'claude-opus-5': 9e-6 })],
+      retryMs: -1,
+      fetch: fetchImpl,
+      onWarn: () => {},
+    })
+    await catalog.ensureLoaded()
+    down = false
+    await catalog.ensureLoaded()
+    expect(catalog.state().status).toBe('ready')
+    await catalog.ensureLoaded()
+    // Loaded and fresh: no further attempts.
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
   it('fetches once while fresh and de-duplicates concurrent loads', async () => {
     const fetchImpl = okFetch()
     const catalog = new PricingCatalog({ sources: [stubSource('remote', {})], fetch: fetchImpl })
