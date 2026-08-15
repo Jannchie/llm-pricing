@@ -1,6 +1,8 @@
+import type { PricingCache } from './cache'
 import type { TokenCounts } from './estimate'
 import type { PricingSource } from './sources'
 import type { CostEstimate, ModelPrice, PriceSchedule, Rates, TimeInput } from './types'
+import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
 import { costFromRates } from './estimate'
@@ -39,6 +41,21 @@ export interface PricingCatalogOptions {
    * urgency.
    */
   retryMs?: number
+  /**
+   * Where to keep fetched catalogues between process lifetimes. Without
+   * one, every restart re-downloads — and models.dev is ~4 MB, so a PM2
+   * cluster pays that per worker per boot.
+   *
+   * `fileCache()` from `llm-pricing/node` is the usual choice; any string
+   * store (Redis, KV, a `Map`) satisfies the interface.
+   */
+  cache?: PricingCache
+  /**
+   * How long a cached copy may be used without re-fetching. Defaults to
+   * `refreshMs`. A copy older than this is still kept as a last resort
+   * when the network is down.
+   */
+  cacheTtlMs?: number
   /** Injected for tests and for runtimes with a non-global fetch. */
   fetch?: typeof globalThis.fetch
   /**
@@ -85,6 +102,8 @@ export class PricingCatalog {
   private readonly sources: PricingSource[]
   private readonly refreshMs: number
   private readonly retryMs: number
+  private readonly cache: PricingCache | undefined
+  private readonly cacheTtlMs: number
   private readonly fetchImpl: typeof globalThis.fetch
   private readonly overrides: Record<string, PriceSchedule>
   private readonly fallback: Record<string, PriceSchedule>
@@ -110,6 +129,8 @@ export class PricingCatalog {
     this.sources = options.sources ?? [modelsDevSource()]
     this.refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS
     this.retryMs = options.retryMs ?? DEFAULT_RETRY_MS
+    this.cache = options.cache
+    this.cacheTtlMs = options.cacheTtlMs ?? this.refreshMs
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.overrides = { ...OVERRIDES, ...options.overrides }
     this.fallback = { ...FALLBACK, ...options.fallback }
@@ -168,39 +189,84 @@ export class PricingCatalog {
    * every request: it resolves immediately while fresh and de-duplicates
    * concurrent loads.
    */
-  ensureLoaded(): Promise<void> {
+  ensureLoaded(options: { force?: boolean } = {}): Promise<void> {
     const now = Date.now()
-    if (this.status === 'ready' && now - this.loadedAt < this.refreshMs) {
-      return Promise.resolve()
+    if (!options.force) {
+      if (this.status === 'ready' && now - this.loadedAt < this.refreshMs) {
+        return Promise.resolve()
+      }
+      // Back off after a total failure so a downed upstream cannot put its
+      // timeout in front of every request.
+      if (this.failedAt !== 0 && now - this.failedAt < this.retryMs) {
+        return Promise.resolve()
+      }
     }
-    // Back off after a total failure so a downed upstream cannot put its
-    // timeout in front of every request.
-    if (this.failedAt !== 0 && now - this.failedAt < this.retryMs) {
-      return Promise.resolve()
-    }
-    this.inflight ??= this.load().finally(() => {
+    // A forced load still joins one already in flight rather than racing
+    // it — the in-flight one is by definition no older than this call.
+    this.inflight ??= this.load(options.force ?? false).finally(() => {
       this.inflight = null
     })
     return this.inflight
   }
 
-  private async load(): Promise<void> {
+  /**
+   * Reload now, ignoring the freshness window, the failure backoff and any
+   * cached copy. For a "prices look wrong" button, a deploy hook, or a cron
+   * that wants the catalogue warm before traffic arrives.
+   */
+  refresh(): Promise<void> {
+    return this.ensureLoaded({ force: true })
+  }
+
+  /**
+   * Fetch one source, or read it from the cache when a fresh copy is
+   * there. Returns the response body plus the time it was actually
+   * retrieved from the network.
+   */
+  private async fetchSource(source: PricingSource, force: boolean): Promise<{ body: string, fetchedAt: number }> {
+    const cached = this.cache ? decodeCacheEntry(await this.cache.get(source.url)) : null
+    if (!force && cached && Date.now() - cached.fetchedAt < this.cacheTtlMs) {
+      return cached
+    }
+    try {
+      const response = await this.fetchImpl(source.url, { headers: { accept: 'application/json' } })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const body = await response.text()
+      const fetchedAt = Date.now()
+      await this.cache?.set(source.url, encodeCacheEntry(fetchedAt, body))
+      return { body, fetchedAt }
+    }
+    catch (error) {
+      // A stale cached copy beats no copy: last week's catalogue is much
+      // closer to the truth than the bundled archive, and the schedule
+      // machinery keeps history on its own rates either way.
+      if (cached) {
+        this.onWarn(`source "${source.name}" unreachable, using cached copy`, error)
+        return cached
+      }
+      throw error
+    }
+  }
+
+  private async load(force: boolean): Promise<void> {
     const merged = new Map<string, PriceSchedule>()
     const loaded: string[] = []
+    // The freshness of the whole catalogue is that of its oldest part.
+    let oldestFetchedAt = Number.POSITIVE_INFINITY
     // Best source first: a later source only fills ids no earlier one had.
     for (const source of this.sources) {
       try {
-        const response = await this.fetchImpl(source.url, { headers: { accept: 'application/json' } })
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
-        }
-        const parsed = source.parse(await response.json())
+        const { body, fetchedAt } = await this.fetchSource(source, force)
+        const parsed = source.parse(JSON.parse(body))
         for (const [key, schedule] of parsed) {
           if (!merged.has(key)) {
             merged.set(key, schedule)
           }
         }
         loaded.push(source.name)
+        oldestFetchedAt = Math.min(oldestFetchedAt, fetchedAt)
       }
       catch (error) {
         this.onWarn(`source "${source.name}" failed to load`, error)
@@ -212,14 +278,18 @@ export class PricingCatalog {
       this.status = this.status === 'ready' ? 'stale' : 'missing'
       this.sourceName = 'fallback'
       this.failedAt = Date.now()
+      this.loadedAt = Date.now()
     }
     else {
       this.remote = merged
       this.status = 'ready'
       this.sourceName = loaded.join('+')
       this.failedAt = 0
+      // Dated by when the data was retrieved, not when it was read from
+      // disk — otherwise reading a cache entry would reset the refresh
+      // clock and the catalogue could never age out.
+      this.loadedAt = oldestFetchedAt
     }
-    this.loadedAt = Date.now()
     this.resolved.clear()
     this.recomputeLivePatterns()
   }

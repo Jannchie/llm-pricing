@@ -5,11 +5,11 @@
   "description": "Time-aware LLM token pricing: resolve a model name to a rate card and turn token counts into USD.",
   "author": "Jannchie",
   "license": "MIT",
+  "homepage": "https://github.com/Jannchie/llm-pricing#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Jannchie/llm-pricing.git"
   },
-  "homepage": "https://github.com/Jannchie/llm-pricing#readme",
   "bugs": {
     "url": "https://github.com/Jannchie/llm-pricing/issues"
   },
@@ -29,6 +29,10 @@
     ".": {
       "types": "./dist/index.d.mts",
       "default": "./dist/index.mjs"
+    },
+    "./node": {
+      "types": "./dist/node.d.mts",
+      "default": "./dist/node.mjs"
     }
   },
   "main": "./dist/index.mjs",
@@ -52,6 +56,7 @@
   },
   "devDependencies": {
     "@jannchie/eslint-config": "^3.7.9",
+    "@types/node": "^26.2.0",
     "eslint": "^10.8.1",
     "tsdown": "^0.22.14",
     "typescript": "^5.7.0",

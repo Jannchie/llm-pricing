@@ -71,6 +71,38 @@ Two things, both because no upstream publishes them at all:
 
 Both tables are append-only. Stored model strings are immortal: deleting a row because upstream retired the model makes its historical rows silently cost $0.
 
+## Caching and refresh
+
+`ensureLoaded()` is built to sit on a per-request path: it returns immediately while the catalogue is fresh (24h), de-duplicates concurrent loads, and backs off for 5 minutes after a total failure rather than putting a downed upstream's timeout in front of every request.
+
+What it does not do on its own is survive a restart. Give it a cache and the download is shared across reboots — and across a PM2 cluster, whose workers would otherwise each pull the same 4 MB:
+
+```ts
+import { PricingCatalog } from 'llm-pricing'
+import { fileCache } from 'llm-pricing/node'
+
+const catalog = new PricingCatalog({
+  cache: fileCache(), // defaults to os.tmpdir()/llm-pricing-cache
+  cacheTtlMs: 24 * 60 * 60 * 1000, // defaults to refreshMs
+})
+```
+
+`PricingCache` is a two-method string store, so Redis, a KV namespace or a plain `Map` (`memoryCache()`) all work:
+
+```ts
+const cache = { get: key => redis.get(key), set: (key, value) => redis.set(key, value) }
+```
+
+Writes through `fileCache` are atomic, and a missing, unreadable or corrupt entry is treated as a miss. When the network is down and the cached copy has aged out, the stale copy is used anyway — last week's catalogue beats falling all the way back to the bundled archive — and `onWarn` fires.
+
+**Force a refresh** past the freshness window, the failure backoff and the cache:
+
+```ts
+await catalog.refresh() // or: catalog.ensureLoaded({ force: true })
+```
+
+Within a process, resolved lookups are memoised per model string, and rate cards are shared by identity — a request pricing thousands of rows across a handful of models allocates one price object per card.
+
 ## Time-aware pricing
 
 Pass `at` when you know the instant the tokens were spent, `window` when the row is a sum over a range:
@@ -116,6 +148,8 @@ for (const row of rows) {
 | `pricingCandidates(model)` | The normalization, exposed for reuse |
 | `modelsDevSource()` / `openRouterSource()` | Source adapters |
 | `PRICE_ANCHOR_COLUMN` / `timeSensitiveSqlPatterns()` | The SQL-side contract |
+| `catalog.refresh()` | Force a reload past freshness, backoff and cache |
+| `fileCache()` (`llm-pricing/node`) / `memoryCache()` | Catalogue caches |
 
 ## Known limits
 
@@ -127,7 +161,7 @@ for (const row of rows) {
 
 ```bash
 pnpm install
-pnpm test        # 111 tests, no network
+pnpm test        # 124 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

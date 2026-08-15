@@ -3,6 +3,8 @@ import type { CostEstimate, ModelPrice, TimeInput } from './types'
 import { PricingCatalog } from './catalog'
 import { estimateCostFromRow as estimateRow } from './row'
 
+export type { PricingCache } from './cache'
+export { memoryCache } from './cache'
 export type {
   EstimateArgs,
   PricingCatalogOptions,
