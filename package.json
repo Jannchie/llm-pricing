@@ -52,6 +52,7 @@
     "lint": "eslint . --fix",
     "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build",
     "sync": "node scripts/sync-snapshot.mjs",
+    "check:live": "vite-node scripts/check-live-prices.ts",
     "example": "vite-node examples/tour.ts"
   },
   "devDependencies": {

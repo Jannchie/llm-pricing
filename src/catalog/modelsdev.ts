@@ -93,6 +93,10 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
   })
 
   const map = new Map<string, PriceSchedule>()
+  // Held aside until every provider has been read, so a real listing always
+  // gets to claim the key first. Insertion order is already best-provider
+  // first, so the first compound quote for a key is the best one.
+  const compound = new Map<string, PriceSchedule>()
   for (const providerId of providers) {
     const models = json[providerId]?.models
     if (!models) {
@@ -116,6 +120,7 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
       const schedule: PriceSchedule = {
         displayName: typeof model.name === 'string' ? model.name : undefined,
         source: 'modelsdev',
+        tier: rank.has(providerId) ? 0 : 1,
         periods: [{
           from: Number.NEGATIVE_INFINITY,
           rates: {
@@ -129,9 +134,26 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
       }
       const bare = modelId.toLowerCase()
       map.set(`${providerId.toLowerCase()}/${bare}`, schedule)
-      if (!map.has(bare)) {
+      // Routers file models under a compound id that already carries a
+      // vendor prefix — `llmgateway` sells one called `z-ai/glm-4.6`. That
+      // lands in the same flat namespace as a real `vendor/model` key, so
+      // a caller asking for `z-ai/glm-4.6` gets the router's margin instead
+      // of Z.ai's own price. Keep them (for models no vendor lists
+      // directly, they are the only quote there is) but never let one
+      // outrank a first-party listing.
+      if (bare.includes('/')) {
+        if (!compound.has(bare)) {
+          compound.set(bare, { ...schedule, tier: 1 })
+        }
+      }
+      else if (!map.has(bare)) {
         map.set(bare, schedule)
       }
+    }
+  }
+  for (const [key, schedule] of compound) {
+    if (!map.has(key)) {
+      map.set(key, schedule)
     }
   }
   return map

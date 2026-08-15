@@ -80,3 +80,80 @@ describe('parsemodelsdev', () => {
     expect(table.get('claude-opus-5')!.source).toBe('modelsdev')
   })
 })
+
+describe('reseller listings never outrank a first-party one', () => {
+  // Shaped after the real api.json: routers file models under a compound
+  // id that already carries a vendor prefix, and junk providers stock
+  // spellings the vendor itself does not use.
+  const json = {
+    zai: { models: { 'glm-4.6': { name: 'GLM-4.6', cost: { input: 0.6, output: 2.2 } } } },
+    openai: { models: { 'gpt-5.5': { name: 'GPT-5.5', cost: { input: 5, output: 30 } } } },
+    llmgateway: {
+      models: {
+        // Squats on the `vendor/model` key a caller means by `z-ai/glm-4.6`.
+        'z-ai/glm-4.6': { name: 'GLM-4.6', cost: { input: 0.55, output: 2.2 } },
+        // The only quote anyone publishes for this model.
+        'x-ai/grok-9-fast': { name: 'Grok 9 Fast', cost: { input: 0.2, output: 0.5 } },
+      },
+    },
+    frogbot: { models: { 'gpt-5-5': { name: 'GPT-5.5', cost: { input: 2.5, output: 15 } } } },
+  }
+  const table = parseModelsDev(json)
+  const input = (key: string): number | undefined => table.get(key)?.periods[0]?.rates.inputCostPerToken
+
+  it('demotes a router compound id instead of passing it off as first-party', () => {
+    // Kept — it is a real quote, and for some models the only one — but
+    // tiered below Z.ai's own listing so the lookup prefers the bare name.
+    expect(input('z-ai/glm-4.6')).toBeCloseTo(5.5e-7, 15)
+    expect(table.get('z-ai/glm-4.6')!.tier).toBe(1)
+    expect(table.get('glm-4.6')!.tier).toBe(0)
+  })
+
+  it('still serves a model only a router lists', () => {
+    expect(input('x-ai/grok-9-fast')).toBeCloseTo(2e-7, 15)
+    expect(table.get('x-ai/grok-9-fast')!.tier).toBe(1)
+  })
+
+  it('tiers a ranked provider above an unranked one', () => {
+    expect(table.get('gpt-5.5')!.tier).toBe(0)
+    expect(table.get('gpt-5-5')!.tier).toBe(1)
+  })
+})
+
+describe('candidate selection prefers a first-party quote', () => {
+  it('takes a normalized spelling the vendor lists over an exact one only resellers stock', async () => {
+    const { PricingCatalog } = await import('../src/catalog')
+    const catalog = new PricingCatalog({
+      sources: [{
+        name: 'test',
+        url: 'https://example.test/models',
+        parse: (json: Parameters<typeof parseModelsDev>[0]) => parseModelsDev(json),
+      }],
+      fetch: (async () => Response.json({
+        openai: { models: { 'gpt-5.5': { name: 'GPT-5.5', cost: { input: 5, output: 30 } } } },
+        frogbot: { models: { 'gpt-5-5': { name: 'GPT-5.5', cost: { input: 2.5, output: 15 } } } },
+      })) as unknown as typeof globalThis.fetch,
+    })
+    await catalog.ensureLoaded()
+    // `gpt-5-5` is candidate #0 and hits; `gpt-5.5` is further down the
+    // list. The lower tier has to win anyway.
+    expect(catalog.getPrice('gpt-5-5')!.inputCostPerToken).toBeCloseTo(5e-6, 15)
+  })
+
+  it('answers a vendor-prefixed name with the vendor price, not the router that squatted the key', async () => {
+    const { PricingCatalog } = await import('../src/catalog')
+    const catalog = new PricingCatalog({
+      sources: [{
+        name: 'test',
+        url: 'https://example.test/models',
+        parse: (json: Parameters<typeof parseModelsDev>[0]) => parseModelsDev(json),
+      }],
+      fetch: (async () => Response.json({
+        zai: { models: { 'glm-4.6': { name: 'GLM-4.6', cost: { input: 0.6, output: 2.2 } } } },
+        llmgateway: { models: { 'z-ai/glm-4.6': { name: 'GLM-4.6', cost: { input: 0.55, output: 2.2 } } } },
+      })) as unknown as typeof globalThis.fetch,
+    })
+    await catalog.ensureLoaded()
+    expect(catalog.getPrice('z-ai/glm-4.6')!.inputCostPerToken).toBeCloseTo(6e-7, 15)
+  })
+})

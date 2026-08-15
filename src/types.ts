@@ -64,6 +64,18 @@ export interface PriceSchedule {
   displayName?: string
   source: PriceSource
   /**
+   * How much this quote is trusted; lower wins. `0` means the source ranks
+   * the quoting provider as first-party for this model, `1` (the default
+   * when absent) means it does not.
+   *
+   * A lookup probes several spellings of one stored name, and a spelling
+   * can be listed *only* by resellers: `gpt-5-5` is sold by three no-name
+   * routers at three different prices, while OpenAI's own listing is filed
+   * under `gpt-5.5`. Without a tier the exact-but-worthless spelling wins
+   * on candidate order alone.
+   */
+  tier?: number
+  /**
    * Ascending by `from`. The first entry opens at -Infinity so any
    * timestamp resolves.
    */

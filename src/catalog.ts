@@ -337,12 +337,21 @@ export class PricingCatalog {
         return base ? scaleSchedule(base, fast.multiplier, 'Fast') : null
       }
     }
+    // Best hit, not first hit. Candidates run most-exact-first, but an
+    // exact spelling only resellers stock (`gpt-5-5`) has to lose to a
+    // normalized one the vendor itself lists (`gpt-5.5`). Ties fall back to
+    // candidate order, so a name that resolves cleanly — nearly all of
+    // them — behaves exactly as before.
     let live: PriceSchedule | null = null
+    let liveTier = Number.POSITIVE_INFINITY
     for (const candidate of candidates) {
       const fromRemote = this.remote.get(candidate)
-      if (fromRemote) {
+      if (fromRemote && (fromRemote.tier ?? 1) < liveTier) {
         live = fromRemote
-        break
+        liveTier = fromRemote.tier ?? 1
+        if (liveTier === 0) {
+          break
+        }
       }
     }
     let archived: PriceSchedule | null = null
