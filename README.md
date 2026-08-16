@@ -23,7 +23,7 @@ estimateCostUsd({
 Multiplying tokens by a price is easy. Everything around it is not:
 
 - **The model name in your database is not the name in any price list.** Agent CLIs store `claude-opus-4-7`, `claude-haiku-4-5-20251001`, `gpt-5.5(xhigh)`, `deepseek-deepseek-v4-pro`. Catalogues use `anthropic/claude-opus-4.7`. Gateways and hosted platforms add another layer on top: `anthropic.claude-opus-4-5-20250514-v1:0` (Bedrock), `claude-opus-4-5@20250514` (Vertex), `publishers/anthropic/models/...`, `z-ai/glm-4.6:nitro`, `together_ai/deepseek-ai/DeepSeek-V3`. All of it is normalized — probing exact keys only, so a bad guess misses instead of mispricing. `:free` is deliberately left unresolved rather than billed at the paid rate.
-- **Cache tokens are most of the bill and are priced four different ways.** Fresh input, cache creation (5m vs 1h TTL, the latter at 2× input), and cache read all differ by up to 100×. Providers that only report `cached_input_tokens` need their cache reads derived, or ~90% of Codex input gets billed at the full prompt rate. And the counts nest differently per vendor: `cachedInputTokens` is part of `inputTokens` (the OpenAI shape), while `cacheCreationInputTokens` and `cacheReadInputTokens` sit *beside* it (the Anthropic shape). Treating the latter as a subset bills real fresh input at $0.
+- **Cache tokens are most of the bill and are priced four different ways.** Fresh input, cache creation (5m vs 1h TTL, the latter at 2× input), and cache read all differ by up to 100×. Providers that only report `cached_input_tokens` need their cache reads derived, or ~90% of Codex input gets billed at the full prompt rate. And whether the cache counts sit *inside* `inputTokens` or *beside* it depends on who wrote the row, not on the vendor: Anthropic's API reports the fresh tokens alone, while a collector normalising several vendors into one schema usually stores the total. Guess wrong in the expensive direction and cache reads bill at the full input rate — a ~10x overcharge on a cache-heavy workload. Say which you have with `inputIncludesCache` (defaults to `true`, the total).
 - **A price is a schedule, not a number.** Vendors change rates, and history must not be re-priced. DeepSeek additionally bills peak and off-peak by UTC hour. Both dimensions are modelled; models with one flat rate — nearly all of them — short-circuit and pay nothing for the machinery.
 - **Catalogues quote resellers.** The same model id is listed by 15–25 providers at their own margin, some at a placeholder $0. Getting first-party rates requires deliberate provider priority.
 
@@ -187,7 +187,7 @@ The schedule primitives accept only a `NormalizedSchedule` — what `normalizeSc
 
 ```bash
 pnpm install
-pnpm test        # 184 tests, no network
+pnpm test        # 187 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

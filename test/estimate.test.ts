@@ -13,7 +13,7 @@ const RATES: Rates = {
 }
 
 describe('costfromrates', () => {
-  it('bills each token count at its own rate', () => {
+  it('splits input into fresh, creation and read', () => {
     const cost = costFromRates(RATES, {
       inputTokens: 1000,
       cachedInputTokens: 0,
@@ -21,9 +21,8 @@ describe('costfromrates', () => {
       cacheReadInputTokens: 500,
       outputTokens: 10,
     })
-    // All four are siblings: `inputTokens` is the fresh count, not a total
-    // the others are carved out of. Only `cachedInputTokens` is a subset.
-    expect(cost).toBeCloseTo(1000 * 1e-6 + 200 * 1e-5 + 500 * 1e-7 + 10 * 1e-4, 12)
+    // fresh = 1000 - 200 - 500 = 300, the default superset reading.
+    expect(cost).toBeCloseTo(300 * 1e-6 + 200 * 1e-5 + 500 * 1e-7 + 10 * 1e-4, 12)
   })
 
   it('derives cache read from cachedinputtokens when the split is absent', () => {
@@ -45,10 +44,7 @@ describe('costfromrates', () => {
       cacheReadInputTokens: 400,
       outputTokens: 0,
     })
-    // 900 of the 1000 input was cached, so 100 is fresh; the explicit 400
-    // decides how much is billed at the read rate, overriding the derived
-    // count.
-    expect(cost).toBeCloseTo(100 * 1e-6 + 400 * 1e-7, 12)
+    expect(cost).toBeCloseTo(600 * 1e-6 + 400 * 1e-7, 12)
   })
 
   it('bills the 1h cache-creation split at 2x input', () => {
@@ -59,7 +55,7 @@ describe('costfromrates', () => {
       cacheCreation1hInputTokens: 200,
       outputTokens: 0,
     })
-    expect(cost).toBeCloseTo(500 * 1e-6 + 300 * 1e-5 + 200 * 1e-6 * CACHE_CREATE_1H_INPUT_MULTIPLIER, 12)
+    expect(cost).toBeCloseTo(300 * 1e-5 + 200 * 1e-6 * CACHE_CREATE_1H_INPUT_MULTIPLIER, 12)
   })
 
   it('is unchanged when the ttl split is unknown', () => {
@@ -78,7 +74,7 @@ describe('costfromrates', () => {
       cacheCreation1hInputTokens: 999_999,
       outputTokens: 0,
     })
-    expect(cost).toBeCloseTo(100 * 1e-6 + 100 * 1e-6 * CACHE_CREATE_1H_INPUT_MULTIPLIER, 12)
+    expect(cost).toBeCloseTo(100 * 1e-6 * CACHE_CREATE_1H_INPUT_MULTIPLIER, 12)
   })
 
   it('does not bill reasoning tokens on top of output', () => {
@@ -132,6 +128,7 @@ describe('cache counts are siblings of the input count, not part of it', () => {
   it('bills fresh input that arrives alongside a cache read', () => {
     // A real Claude Code turn: 2 fresh, 1603 written, 198363 read.
     const cost = costFromRates(rates, {
+      inputIncludesCache: false,
       inputTokens: 2,
       cachedInputTokens: 0,
       cacheCreationInputTokens: 1603,
@@ -145,6 +142,7 @@ describe('cache counts are siblings of the input count, not part of it', () => {
   it('bills fresh input on a first turn that only writes cache', () => {
     // No read at all, so nothing can be inferred from one being present.
     const cost = costFromRates(rates, {
+      inputIncludesCache: false,
       inputTokens: 1000,
       cachedInputTokens: 0,
       cacheCreationInputTokens: 5000,
@@ -162,5 +160,49 @@ describe('cache counts are siblings of the input count, not part of it', () => {
       outputTokens: 1391,
     })
     expect(cost).toBeCloseTo(8988 * 5e-6 + 21_248 * 5e-7 + 1391 * 25e-6, 12)
+  })
+})
+
+describe('who decides whether input already contains the cache counts', () => {
+  // Measured across two producers of the SAME underlying turns:
+  //
+  //   Claude Code's own jsonl   input_tokens = fresh only      (siblings)
+  //   codetime's collector      input_tokens = the whole total (superset)
+  //
+  // 46,960 rows of codetime's `agent_session_models` satisfy
+  // `total = input + output` exactly and never once have
+  // `input < cache_read`. So the nesting is a property of the producer, not
+  // of the vendor, and the library cannot infer it: a sibling row with big
+  // fresh input and a small cache write looks exactly like a superset row.
+  //
+  // The default is superset because the failure directions are not
+  // symmetric. Reading a superset as siblings bills cache reads at the full
+  // input rate — a ~10x OVERCHARGE on 90% of tokens. The reverse only drops
+  // the fresh component.
+  const RATES2: Rates = {
+    inputCostPerToken: 5e-6,
+    cacheCreationInputCostPerToken: 6.25e-6,
+    cacheReadInputCostPerToken: 5e-7,
+    cachedInputCostPerToken: 5e-7,
+    outputCostPerToken: 25e-6,
+  }
+  const superset = { inputTokens: 200_000, cachedInputTokens: 0, cacheCreationInputTokens: 1600, cacheReadInputTokens: 198_363, outputTokens: 0 }
+
+  it('carves the cache counts out of input by default', () => {
+    const cost = costFromRates(RATES2, superset)
+    const fresh = 200_000 - 1600 - 198_363
+    expect(cost).toBeCloseTo(fresh * 5e-6 + 1600 * 6.25e-6 + 198_363 * 5e-7, 12)
+  })
+
+  it('bills input as fresh when the producer reports siblings', () => {
+    const cost = costFromRates(RATES2, { ...superset, inputTokens: 2, inputIncludesCache: false })
+    expect(cost).toBeCloseTo(2 * 5e-6 + 1600 * 6.25e-6 + 198_363 * 5e-7, 12)
+  })
+
+  it('never bills a cache read at the input rate by accident', () => {
+    // The expensive mistake, pinned: reading codetime's shape with the
+    // wrong convention would cost ~10x.
+    const wrong = costFromRates(RATES2, { ...superset, inputIncludesCache: false })
+    expect(wrong / costFromRates(RATES2, superset)).toBeGreaterThan(5)
   })
 })

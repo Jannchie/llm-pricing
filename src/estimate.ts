@@ -10,6 +10,25 @@ export const CACHE_CREATE_1H_INPUT_MULTIPLIER = 2
 export interface TokenCounts {
   inputTokens: number
   /**
+   * Whether `inputTokens` already contains `cacheCreationInputTokens` and
+   * `cacheReadInputTokens`. Defaults to `true`.
+   *
+   * This is a property of whoever WROTE the row, not of the vendor. The
+   * same turn is reported both ways: Anthropic's API — and Claude Code's
+   * own log — put `input_tokens` beside the cache counts as the fresh
+   * tokens alone, while a collector that normalises everything into one
+   * schema (codetime's, for one, measured across 46,960 rows) stores the
+   * total. It cannot be inferred: a sibling row with large fresh input and
+   * a small cache write is indistinguishable from a superset row.
+   *
+   * Defaults to `true` because the failure directions are not symmetric.
+   * Reading a superset as siblings bills cache reads at the full input rate
+   * — on a cache-heavy workload a ~10x overcharge. Reading siblings as a
+   * superset only drops the fresh component, which for the same workload is
+   * a fraction of a percent.
+   */
+  inputIncludesCache?: boolean
+  /**
    * Tokens served from cache as reported by providers that do NOT split
    * cache read from cache creation (OpenAI / Codex). A subset of
    * `inputTokens`.
@@ -80,18 +99,14 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
   const cacheRead = explicitCacheRead > 0
     ? explicitCacheRead
     : Math.max(0, cached - cacheCreation)
-  // `cachedInputTokens` is the ONLY count documented as part of
-  // `inputTokens`, so it is the only one carved back out of it.
-  //
-  // Anthropic reports `input_tokens` as the fresh tokens alone, with
-  // `cache_creation_input_tokens` and `cache_read_input_tokens` beside it
-  // rather than inside it; so does any client that has already split hit
-  // from miss. Subtracting those there bills real fresh input at $0 —
-  // silently, because the result is a smaller number rather than an error.
-  // Measured against four agent CLIs' own cost figures, that was the whole
-  // of the disagreement: correcting it reproduced two of them exactly and
-  // left the Codex-shaped one untouched.
-  const fresh = Math.max(0, count(tokens.inputTokens) - Math.min(cached, count(tokens.inputTokens)))
+  // Whether the cache counts are already inside `inputTokens` is a property
+  // of whoever wrote the row, not of the vendor — see `inputIncludesCache`.
+  // `cachedInputTokens` is carved out either way: it is a subset by
+  // definition, which is the whole reason it is a separate field.
+  const input = count(tokens.inputTokens)
+  const fresh = tokens.inputIncludesCache === false
+    ? Math.max(0, input - Math.min(cached, input))
+    : Math.max(0, input - cacheCreation - cacheRead)
   const output = count(tokens.outputTokens)
   return fresh * rates.inputCostPerToken
     + creationDefaultRate * rates.cacheCreationInputCostPerToken
