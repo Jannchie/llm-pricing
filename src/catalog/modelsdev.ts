@@ -1,4 +1,4 @@
-import type { PriceSchedule } from '../types'
+import type { ContextTier, PriceSchedule, Rates } from '../types'
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json'
 
@@ -36,6 +36,17 @@ export interface ModelsDevCost {
   cache_read?: number
   cache_write?: number
   reasoning?: number
+  /**
+   * Request-scale tiers. Each entry is a full cost block plus the threshold
+   * that selects it; only `tier.type === 'context'` exists upstream today
+   * (375 of 375 tiers across 360 models), and anything else is ignored
+   * rather than guessed at.
+   */
+  tiers?: ModelsDevTier[]
+}
+
+export interface ModelsDevTier extends ModelsDevCost {
+  tier?: { type?: string, size?: number }
 }
 
 interface ModelsDevModel {
@@ -104,6 +115,48 @@ export function cacheRatesFrom(cost: ModelsDevCost, divisor: number): { cacheRea
   return { cacheRead, cacheWrite }
 }
 
+/** The five rates a models.dev cost block implies, in `divisor`'s unit. */
+export function ratesFromCost(cost: ModelsDevCost, divisor: number): Rates {
+  const { cacheRead, cacheWrite } = cacheRatesFrom(cost, divisor)
+  return {
+    inputCostPerToken: cost.input! / divisor,
+    cacheCreationInputCostPerToken: cacheWrite,
+    cacheReadInputCostPerToken: cacheRead,
+    cachedInputCostPerToken: cacheRead,
+    outputCostPerToken: cost.output! / divisor,
+  }
+}
+
+/**
+ * The long-context tiers a models.dev cost block declares, ascending.
+ *
+ * Only `type: 'context'` is read. A tier's threshold is a **prompt** length,
+ * so a differently-typed tier would be selected by something this package
+ * does not measure; ignoring it prices those requests at the base rate,
+ * which undercharges, where guessing could overcharge every request.
+ *
+ * Each tier must pass `isUsableCost` in its own right. That matters more
+ * here than for a base quote: a tier quoting 0/0 would make every request
+ * above the threshold free, turning the dearest requests into the cheapest.
+ */
+export function contextTiersFrom(cost: ModelsDevCost, divisor: number): ContextTier[] | undefined {
+  const tiers: ContextTier[] = []
+  for (const tier of cost.tiers ?? []) {
+    const size = tier.tier?.size
+    if (tier.tier?.type !== 'context' || typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
+      continue
+    }
+    if (!isUsableCost(tier)) {
+      continue
+    }
+    tiers.push({ abovePromptTokens: size, rates: ratesFromCost(tier, divisor) })
+  }
+  if (tiers.length === 0) {
+    return undefined
+  }
+  return tiers.sort((a, b) => a.abovePromptTokens - b.abovePromptTokens)
+}
+
 /**
  * Turn a models.dev `api.json` payload into a lookup keyed by both
  * `provider/model` and the bare model id.
@@ -111,9 +164,10 @@ export function cacheRatesFrom(cost: ModelsDevCost, divisor: number): { cacheRea
  * models.dev quotes USD per **million** tokens; this converts to per-token
  * so every source in this package speaks the same unit.
  *
- * Long-context tiers (`tiers` / `context_over_200k`) are deliberately
- * ignored: selecting between them needs the context length of each
- * individual request, which aggregated usage rows no longer carry.
+ * Long-context tiers are read from `cost.tiers`. The older
+ * `context_over_200k` field is ignored: it is a redundant restatement of the
+ * same numbers with the threshold baked into the key, and reading both would
+ * risk quoting one model two thresholds.
  */
 export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevOptions = {}): Map<string, PriceSchedule> {
   const priority = options.providerPriority ?? DEFAULT_PROVIDER_PRIORITY
@@ -139,9 +193,6 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
       if (!isUsableCost(cost)) {
         continue
       }
-      const input = cost.input! / 1e6
-      const output = cost.output! / 1e6
-      const { cacheRead, cacheWrite } = cacheRatesFrom(cost, 1e6)
       const schedule: PriceSchedule = {
         displayName: typeof model.name === 'string' ? model.name : undefined,
         source: 'modelsdev',
@@ -149,13 +200,8 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
         tier: rank.has(providerId) ? 0 : 1,
         periods: [{
           from: Number.NEGATIVE_INFINITY,
-          rates: {
-            inputCostPerToken: input,
-            cacheCreationInputCostPerToken: cacheWrite,
-            cacheReadInputCostPerToken: cacheRead,
-            cachedInputCostPerToken: cacheRead,
-            outputCostPerToken: output,
-          },
+          rates: ratesFromCost(cost, 1e6),
+          contextTiers: contextTiersFrom(cost, 1e6),
         }],
       }
       const bare = modelId.toLowerCase()

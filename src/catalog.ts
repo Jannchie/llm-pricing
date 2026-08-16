@@ -7,12 +7,12 @@ import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
-import { costFromRates, tokensBilled } from './estimate'
+import { costFromRates, promptTokensBilled, tokensBilled } from './estimate'
 import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
 import { estimateCostFromRow as estimateRow } from './row'
-import { isTimeSensitive, ratesFor, toMs } from './schedule'
+import { hasContextTiers, isTimeSensitive, ratesFor, toMs } from './schedule'
 import { modelsDevSource } from './sources'
 
 const DEFAULT_REFRESH_MS = 24 * 60 * 60 * 1000
@@ -109,6 +109,33 @@ export type EstimateArgs = TokenCounts & {
    */
   at?: TimeInput
   window?: readonly [TimeInput, TimeInput]
+  /**
+   * Whether these counts describe **one request**. Defaults to false.
+   *
+   * This is the gate on long-context tiers (see `ContextTier`), and it has
+   * to be stated rather than inferred, because the threshold is per request
+   * and a sum destroys exactly that: ten 30k requests plus one 500k request
+   * add up to the same input as eleven 70k requests, and only the first has
+   * a row that crossed 272k. Dividing by a request count does not recover
+   * it either — an average is not a distribution.
+   *
+   * Defaulting to false keeps an aggregated row on the base card, which
+   * undercharges the rare long request rather than overcharging every short
+   * one. Rows that really are per-request — an agent CLI's message log, a
+   * request-level API table — should set it and get the tier.
+   */
+  perRequest?: boolean
+  /**
+   * The prompt length to select a long-context tier against, overriding what
+   * the counts imply. Passing it implies `perRequest`.
+   *
+   * For rows that carry the context length directly but whose component
+   * counts are unreliable — a producer that stores `context_tokens` but
+   * folds its cache counts together, say. Without it the length is derived
+   * from the same quantities that get billed at the input rates
+   * (`promptTokensBilled`), which is right whenever those counts are.
+   */
+  promptTokens?: number
 }
 
 /**
@@ -548,16 +575,31 @@ export class PricingCatalog {
    * request parameters is an unbounded structure hanging off schedules that
    * — for flat models — the constructor owns and never releases.
    */
-  private readonly lastBlend = new WeakMap<NormalizedSchedule, { from: number, to: number, resolved: ResolvedRates }>()
+  private readonly lastBlend = new WeakMap<NormalizedSchedule, { from: number, to: number, promptTokens: number | undefined, resolved: ResolvedRates }>()
 
-  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs): ResolvedRates {
+  /**
+   * The prompt length to select a long-context tier against, or undefined
+   * when the caller has not said this row is a single request.
+   *
+   * `promptTokens` implies `perRequest`: a caller who states the prompt
+   * length has necessarily told us the row describes one prompt.
+   */
+  private promptTokensFor(args: EstimateArgs): number | undefined {
+    if (args.promptTokens !== undefined) {
+      const n = Number(args.promptTokens)
+      return Number.isFinite(n) && n > 0 ? n : 0
+    }
+    return args.perRequest ? promptTokensBilled(args) : undefined
+  }
+
+  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs, promptTokens: number | undefined): ResolvedRates {
     // Before anything else: a flat schedule ignores time entirely and
     // returns its one card, so every step below would be work spent to
     // memoise a `periods.length` check — and would pin a WeakMap entry to a
     // schedule the constructor holds forever. Flat is nearly every model.
     const window = args.window
     if (!window || !isTimeSensitive(schedule) || toMs(args.at) !== null) {
-      return ratesFor(schedule, args.at, window)
+      return ratesFor(schedule, args.at, window, Date.now(), promptTokens)
     }
     const a = toMs(window[0])
     const b = toMs(window[1])
@@ -566,23 +608,30 @@ export class PricingCatalog {
     // Only a fully-bounded window makes the result a pure function of the
     // key.
     if (a === null || b === null) {
-      return ratesFor(schedule, args.at, window)
+      return ratesFor(schedule, args.at, window, Date.now(), promptTokens)
     }
     // A window is an interval, not an ordered pair — `ratesFor` says so and
     // normalises it, so the slot has to agree or the same interval written
     // backwards misses.
     const from = Math.min(a, b)
     const to = Math.max(a, b)
+    // Prompt length is part of the key, not just the window: two rows over
+    // the same window can land in different long-context tiers, and a slot
+    // keyed on the window alone would hand the second row the first one's
+    // card. Dropped from the key entirely for a schedule with no tiers —
+    // nearly all of them — where it cannot change the answer and would
+    // otherwise turn every row into a miss.
+    const tierKey = hasContextTiers(schedule) ? promptTokens : undefined
     const hit = this.lastBlend.get(schedule)
-    if (hit && hit.from === from && hit.to === to) {
+    if (hit && hit.from === from && hit.to === to && hit.promptTokens === tierKey) {
       return hit.resolved
     }
-    const resolved = ratesFor(schedule, undefined, window)
-    this.lastBlend.set(schedule, { from, to, resolved })
+    const resolved = ratesFor(schedule, undefined, window, Date.now(), promptTokens)
+    this.lastBlend.set(schedule, { from, to, promptTokens: tierKey, resolved })
     return resolved
   }
 
-  private priceCardFor(schedule: PriceSchedule, rates: Rates): ModelPrice {
+  private priceCardFor(schedule: PriceSchedule, rates: Rates, tierAbove?: number): ModelPrice {
     const cached = this.priceCards.get(rates)
     if (cached) {
       return cached
@@ -592,18 +641,29 @@ export class PricingCatalog {
       displayName: schedule.displayName,
       source: schedule.source,
       providerId: schedule.providerId,
+      // Safe to memoise on the rates object even though it is a second key:
+      // a tier's card is a distinct object owned by exactly one tier, so a
+      // given `Rates` can never be reached through two thresholds.
+      contextTierAbove: tierAbove,
     }
     this.priceCards.set(rates, card)
     return card
   }
 
-  /** Resolve a model to the flat rate card that applies at `at` (default: now). */
-  getPrice(model: string, at?: TimeInput): ModelPrice | null {
+  /**
+   * Resolve a model to the flat rate card that applies at `at` (default: now).
+   *
+   * `promptTokens` selects a long-context tier, for showing what a request of
+   * that size would be charged. Omitted, the base card is returned — which is
+   * the right answer for "what does this model cost".
+   */
+  getPrice(model: string, at?: TimeInput, promptTokens?: number): ModelPrice | null {
     const schedule = this.getSchedule(model)
     if (!schedule) {
       return null
     }
-    return this.priceCardFor(schedule, ratesFor(schedule, at ?? Date.now(), undefined).rates)
+    const resolved = ratesFor(schedule, at ?? Date.now(), undefined, Date.now(), promptTokens)
+    return this.priceCardFor(schedule, resolved.rates, resolved.tierAbove)
   }
 
   /**
@@ -621,7 +681,7 @@ export class PricingCatalog {
     if (!schedule) {
       return { cost: 0, pricing: null, basis: 'flat', low: 0, high: 0, tokens }
     }
-    const { rates, basis, cards } = this.ratesForMemo(schedule, args)
+    const { rates, basis, cards, tierAbove } = this.ratesForMemo(schedule, args, this.promptTokensFor(args))
     const cost = costFromRates(rates, args)
     // Cost is linear in the rates, so the blend's cost is the same weighted
     // average of the cards' costs — it cannot fall outside them, and these
@@ -639,7 +699,7 @@ export class PricingCatalog {
         }
       }
     }
-    return { cost, pricing: this.priceCardFor(schedule, rates), basis, low, high, tokens }
+    return { cost, pricing: this.priceCardFor(schedule, rates, tierAbove), basis, low, high, tokens }
   }
 
   /**

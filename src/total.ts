@@ -42,8 +42,9 @@ export interface CostTotal {
   /**
    * The distinct rate cards that produced this cost, most expensive first,
    * with what each contributed. More than one for a model priced across a
-   * peak boundary — which is the case a single `pricing` field cannot
-   * represent and silently misreports.
+   * peak boundary, or a workload whose long requests crossed a long-context
+   * threshold while its short ones did not — the cases a single `pricing`
+   * field cannot represent and silently misreports.
    */
   cards: Array<{ pricing: ModelPrice, cost: number, count: number }>
 }
@@ -66,7 +67,11 @@ const EMPTY: CostTotal = {
  * and `cards` is read to answer "what was this charged at".
  */
 function cardKey(pricing: ModelPrice): string {
-  let key = `${pricing.source}|${pricing.providerId ?? ''}|${pricing.displayName ?? ''}`
+  // The tier is part of the identity, not a decoration: "the base rate" and
+  // "the rate above 272k" are two different facts about the same model, and
+  // a caller reading `cards` to answer "what was this charged at" needs them
+  // apart even in the corner case where a tier happens to quote equal rates.
+  let key = `${pricing.source}|${pricing.providerId ?? ''}|${pricing.displayName ?? ''}|${pricing.contextTierAbove ?? ''}`
   for (const rate of RATE_KEYS) {
     key += `|${pricing[rate]}`
   }

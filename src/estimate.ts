@@ -161,6 +161,25 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
 }
 
 /**
+ * The prompt length a long-context tier is selected against: everything on
+ * the input side of the bill, and nothing from the output side.
+ *
+ * The same quantity `costFromRates` bills at the three input rates, which
+ * is what makes it the right measure — the vendors' threshold is on the
+ * prompt, and the prompt is exactly fresh input plus whatever part of it
+ * was read from or written to cache. Output tokens are billed at the tier's
+ * rate once it is crossed but never count toward crossing it.
+ *
+ * Only meaningful for a single request. Summed over a day it says nothing
+ * about whether any individual request cleared a threshold, which is why
+ * `estimate` consults it only under `perRequest`.
+ */
+export function promptTokensBilled(tokens: TokenCounts): number {
+  const b = billedTokens(tokens)
+  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead
+}
+
+/**
  * How many tokens `costFromRates` would bill for the same counts.
  *
  * Not the row's `total_tokens`: cache reads and fresh input are counted

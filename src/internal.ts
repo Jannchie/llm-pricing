@@ -8,17 +8,18 @@
 // itself unless you specifically need one of these.
 
 export { FALLBACK, FAST_BY_ID, FAST_MULTIPLIERS } from './catalog/fallback'
-export type { ModelsDevResponse } from './catalog/modelsdev'
-export { DEFAULT_PROVIDER_PRIORITY, MODELS_DEV_URL, parseModelsDev } from './catalog/modelsdev'
+export type { ModelsDevResponse, ModelsDevTier } from './catalog/modelsdev'
+export { contextTiersFrom, DEFAULT_PROVIDER_PRIORITY, MODELS_DEV_URL, parseModelsDev, ratesFromCost } from './catalog/modelsdev'
 export type { OpenRouterModelsResponse } from './catalog/openrouter'
 export { OPENROUTER_MODELS_URL, parseOpenRouterModels } from './catalog/openrouter'
 export { OVERRIDES } from './catalog/overrides'
-export type { SnapshotEntry, SnapshotModels, SnapshotPeriod, SyncResult } from './catalog/sync'
+export type { SnapshotEntry, SnapshotModels, SnapshotPeriod, SnapshotTier, SyncResult } from './catalog/sync'
 export { mergeSnapshot } from './catalog/sync'
 export { normalizeSchedule } from './normalize'
 export {
   flatSchedule,
   mergeLiveQuote,
+  periodPricesEqual,
   ratesEqual,
   scaleRates,
   scaleSchedule,
@@ -28,6 +29,8 @@ export { dotted, undotted } from './resolve'
 export {
   blendParts,
   blendRates,
+  contextTierFor,
+  hasContextTiers,
   isPeakHour,
   isTimeSensitive,
   peakMsBetween,

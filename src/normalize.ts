@@ -23,7 +23,7 @@ import { RATE_KEYS } from './types'
  */
 function unbillableRate(schedule: PriceSchedule): string | null {
   for (const period of schedule.periods) {
-    for (const rates of [period.rates, period.peak?.rates]) {
+    for (const rates of [period.rates, period.peak?.rates, ...(period.contextTiers ?? []).map(tier => tier.rates)]) {
       if (!rates) {
         continue
       }
@@ -73,8 +73,14 @@ export function normalizeSchedule(
   // is otherwise shared by identity.
   const only = schedule.periods.length === 1 ? schedule.periods[0] : undefined
   if (only && !only.peak && only.from === Number.NEGATIVE_INFINITY) {
+    // Tiers still have to pass their own gate — a flat-in-time schedule is
+    // exactly the shape most tiered models have (gpt-5.5, Gemini 2.5 Pro),
+    // so skipping them here would leave the hot path reading an unsorted
+    // list. `normalizeTiers` returns the period by identity when there is
+    // nothing to fix, which keeps the table shared rather than copied.
+    const gated = normalizeTiers(only, onWarn, id)
     warnIfUnanchored(schedule, onWarn, id)
-    return schedule as NormalizedSchedule
+    return (gated === only ? schedule : { ...schedule, periods: [gated] }) as NormalizedSchedule
   }
 
   const usable = schedule.periods.filter(period => !Number.isNaN(period.from))
@@ -91,13 +97,14 @@ export function normalizeSchedule(
 
   const periods: PricePeriod[] = usable.map((period) => {
     if (!period.peak) {
-      return period
+      return normalizeTiers(period, onWarn, id)
     }
     const windowsUtc = normalizeWindows(period.peak.windowsUtc)
-    // Every window was nonsense: the period simply has no peak.
+    // Every window was nonsense: the period simply has no peak — which also
+    // means its tiers are no longer in conflict and can be kept.
     return windowsUtc.length === 0
-      ? { from: period.from, rates: period.rates }
-      : { ...period, peak: { ...period.peak, windowsUtc } }
+      ? normalizeTiers({ from: period.from, rates: period.rates, contextTiers: period.contextTiers }, onWarn, id)
+      : normalizeTiers({ ...period, peak: { ...period.peak, windowsUtc } }, onWarn, id)
   })
 
   // The first period must open at -Infinity. `periodAt` already falls back
@@ -139,6 +146,66 @@ function warnIfUnanchored(
     `schedule "${id ?? schedule.displayName ?? '?'}" varies with time but declares no sqlMatch, so its rows cannot be anchored to an hour`,
     undefined,
   )
+}
+
+/**
+ * Bring a period's long-context tiers to the shape `contextTierFor` assumes,
+ * or strip them.
+ *
+ * Returned by identity when there is nothing to change, so the common case —
+ * no tiers at all, or upstream's already-sorted list — allocates nothing and
+ * lets the bundled tables stay shared.
+ *
+ * Three rules, each guarding a way a bad tier costs more than no tier:
+ *
+ * - **Never alongside `peak`.** The two dimensions are independent and no
+ *   vendor publishes both, so a period carrying both is malformed rather
+ *   than expressive. Keeping the peak is the safer half to keep: it applies
+ *   to every request inside its hours, where a tier applies only to
+ *   unusually long ones.
+ * - **Thresholds must be positive and finite.** A threshold of 0 makes the
+ *   "tier" the base rate for every request, silently doubling an entire
+ *   vendor's bill.
+ * - **Ascending, and one card per threshold.** `contextTierFor` stops at the
+ *   first threshold the prompt fails, so an unsorted list can return a
+ *   cheaper tier than the one that applies.
+ */
+function normalizeTiers(
+  period: PricePeriod,
+  onWarn: ((message: string, error: unknown) => void) | undefined,
+  name = '?',
+): PricePeriod {
+  const tiers = period.contextTiers
+  if (!tiers || tiers.length === 0) {
+    return tiers ? { ...period, contextTiers: undefined } : period
+  }
+  if (period.peak) {
+    onWarn?.(
+      `schedule "${name}" prices both a peak window and a long-context tier; keeping the peak and dropping the tier, since no vendor publishes both`,
+      undefined,
+    )
+    return { ...period, contextTiers: undefined }
+  }
+  const usable = tiers.filter(tier => Number.isFinite(tier.abovePromptTokens) && tier.abovePromptTokens > 0)
+  if (usable.length !== tiers.length) {
+    onWarn?.(`schedule "${name}" has ${tiers.length - usable.length} long-context tier(s) with an unusable threshold; dropped`, undefined)
+  }
+  // Copy before sorting only when `filter` did not already make the array
+  // ours, so an already-sorted upstream list is compared, not rebuilt.
+  const sorted = (usable.length === tiers.length ? [...usable] : usable)
+    .sort((a, b) => a.abovePromptTokens - b.abovePromptTokens)
+  const deduped = sorted.filter((tier, i) => {
+    const clash = i > 0 && sorted[i - 1]!.abovePromptTokens === tier.abovePromptTokens
+    if (clash) {
+      onWarn?.(`schedule "${name}" quotes two long-context tiers above ${tier.abovePromptTokens} tokens; keeping the first`, undefined)
+    }
+    return !clash
+  })
+  if (deduped.length === 0) {
+    return { ...period, contextTiers: undefined }
+  }
+  const unchanged = deduped.length === tiers.length && deduped.every((tier, i) => tier === tiers[i])
+  return unchanged ? period : { ...period, contextTiers: deduped }
 }
 
 /**

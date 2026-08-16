@@ -1,4 +1,4 @@
-import type { PriceSchedule, Rates } from './types'
+import type { PricePeriod, PriceSchedule, Rates } from './types'
 import { RATE_KEYS } from './types'
 
 export function scaleRates(rates: Rates, multiplier: number): Rates {
@@ -78,6 +78,26 @@ export function ratesEqual(a: Rates, b: Rates): boolean {
 }
 
 /**
+ * Whether two periods quote the same price in every dimension — base card
+ * and long-context tiers alike.
+ *
+ * `ratesEqual` alone is what `mergeLiveQuote` used to compare, and it cannot
+ * see a reprice that only moved the tier: a model whose base rate holds
+ * steady while its >272k rate doubles would read as "unchanged" and keep the
+ * old tier forever. Peak is deliberately not compared — `mergeLiveQuote`
+ * refuses to touch a peak schedule at all, so it never gets this far.
+ */
+export function periodPricesEqual(a: PricePeriod, b: PricePeriod): boolean {
+  if (!ratesEqual(a.rates, b.rates)) {
+    return false
+  }
+  const at = a.contextTiers ?? []
+  const bt = b.contextTiers ?? []
+  return at.length === bt.length
+    && at.every((tier, i) => tier.abovePromptTokens === bt[i]!.abovePromptTokens && ratesEqual(tier.rates, bt[i]!.rates))
+}
+
+/**
  * Apply a live catalogue quote on top of an archived price history.
  *
  * Every upstream catalogue publishes one number per model: what it costs
@@ -110,17 +130,20 @@ export function mergeLiveQuote(
   if (latest.peak) {
     return archive
   }
-  if (ratesEqual(latest.rates, live.periods.at(-1)!.rates)) {
+  const liveLatest = live.periods.at(-1)!
+  if (periodPricesEqual(latest, liveLatest)) {
     // The catalogue confirms what the archive already knew. Keep the
     // history, but credit the live source — it is what was consulted.
     return { ...archive, displayName: live.displayName ?? archive.displayName, source: live.source, providerId: live.providerId }
   }
-  const liveRates = live.periods.at(-1)!.rates
+  // Carried across whole: a tier is part of the quote, so grafting the base
+  // rate while dropping the tier would price long requests at the new base.
+  const grafted = { rates: liveLatest.rates, contextTiers: liveLatest.contextTiers }
   const periods = observedFromMs > latest.from
-    ? [...archive.periods, { from: observedFromMs, rates: liveRates }]
+    ? [...archive.periods, { from: observedFromMs, ...grafted }]
     // The archive's own last observation is no older than our evidence, so
     // there is no interval to attribute the old rate to: correct it.
-    : [...archive.periods.slice(0, -1), { from: latest.from, rates: liveRates }]
+    : [...archive.periods.slice(0, -1), { from: latest.from, ...grafted }]
   return {
     displayName: live.displayName ?? archive.displayName,
     source: live.source,
@@ -148,6 +171,12 @@ export function scaleSchedule(base: PriceSchedule, multiplier: number, displayNa
       peak: period.peak
         ? { windowsUtc: period.peak.windowsUtc, rates: scaleRates(period.peak.rates, multiplier) }
         : undefined,
+      // Scaled, not dropped: `gpt-5.4-fast` is the same model on a premium
+      // tier, so it keeps the base model's 272k threshold at 2x the rate.
+      contextTiers: period.contextTiers?.map(tier => ({
+        abovePromptTokens: tier.abovePromptTokens,
+        rates: scaleRates(tier.rates, multiplier),
+      })),
     })),
   }
 }

@@ -1,5 +1,5 @@
-import type { PricePeriod, PriceSchedule } from '../types'
-import type { SnapshotEntry, SnapshotPeriod } from './sync'
+import type { ContextTier, PricePeriod, PriceSchedule, Rates } from '../types'
+import type { SnapshotEntry, SnapshotPeriod, SnapshotTier } from './sync'
 
 import snapshot from './snapshot.json'
 
@@ -29,16 +29,27 @@ export const SNAPSHOT_SYNCED_AT: string = snapshot.syncedAt
  */
 export const SNAPSHOT_SYNCED_AT_MS: number = Date.parse(`${snapshot.syncedAt}T00:00:00Z`)
 
-function toPeriod([from, input, cacheWrite, cacheRead, output]: SnapshotPeriod): PricePeriod {
+function toRates(input: number, cacheWrite: number, cacheRead: number, output: number): Rates {
+  return {
+    inputCostPerToken: input / 1e6,
+    cacheCreationInputCostPerToken: cacheWrite / 1e6,
+    cacheReadInputCostPerToken: cacheRead / 1e6,
+    cachedInputCostPerToken: cacheRead / 1e6,
+    outputCostPerToken: output / 1e6,
+  }
+}
+
+function toTier([above, input, cacheWrite, cacheRead, output]: SnapshotTier): ContextTier {
+  return { abovePromptTokens: above, rates: toRates(input, cacheWrite, cacheRead, output) }
+}
+
+function toPeriod([from, input, cacheWrite, cacheRead, output, tiers]: SnapshotPeriod): PricePeriod {
   return {
     from: from === null ? Number.NEGATIVE_INFINITY : Date.parse(`${from}T00:00:00Z`),
-    rates: {
-      inputCostPerToken: input / 1e6,
-      cacheCreationInputCostPerToken: cacheWrite / 1e6,
-      cacheReadInputCostPerToken: cacheRead / 1e6,
-      cachedInputCostPerToken: cacheRead / 1e6,
-      outputCostPerToken: output / 1e6,
-    },
+    rates: toRates(input, cacheWrite, cacheRead, output),
+    // Absent on every period archived before tiers were recorded, which is
+    // the honest reading: those rows were observed as one flat rate.
+    contextTiers: tiers?.map(toTier),
   }
 }
 

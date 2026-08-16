@@ -28,7 +28,7 @@ Multiplying tokens by a price is easy. Everything around it is not:
 
 - **The model name in your database is not the name in any price list.** Agent CLIs store `claude-opus-4-7`, `claude-haiku-4-5-20251001`, `gpt-5.5(xhigh)`, `deepseek-deepseek-v4-pro`. Catalogues use `anthropic/claude-opus-4.7`. Gateways and hosted platforms add another layer on top: `anthropic.claude-opus-4-5-20250514-v1:0` (Bedrock), `claude-opus-4-5@20250514` (Vertex), `publishers/anthropic/models/...`, `z-ai/glm-4.6:nitro`, `together_ai/deepseek-ai/DeepSeek-V3`. All of it is normalized — probing exact keys only, so a bad guess misses instead of mispricing. `:free` is deliberately left unresolved rather than billed at the paid rate.
 - **Cache tokens are most of the bill and are priced four different ways.** Fresh input, cache creation (5m vs 1h TTL, the latter at 2× input), and cache read all differ by up to 100×. Providers that only report `cached_input_tokens` need their cache reads derived, or ~90% of Codex input gets billed at the full prompt rate. Worse, whether those counts sit *inside* `inputTokens` or *beside* it is a property of whoever wrote the row rather than of the vendor — and guessing wrong bills every cached token at the full input rate, a ~10× overcharge. See [Token shapes](#token-shapes).
-- **A price is a schedule, not a number.** Vendors change rates, and history must not be re-priced. DeepSeek additionally bills peak and off-peak by UTC hour. Both dimensions are modelled; models with one flat rate — nearly all of them — short-circuit and pay nothing for the machinery.
+- **A price is a schedule, not a number.** Vendors change rates, and history must not be re-priced. DeepSeek additionally bills peak and off-peak by UTC hour, and a request whose prompt clears 272k pays double for its whole length. All three dimensions are modelled; models with one flat rate — nearly all of them — short-circuit and pay nothing for the machinery. See [Long-context tiers](#long-context-tiers).
 - **Catalogues quote resellers.** The same model id is listed by 15–25 providers at their own margin, some at a placeholder $0. Getting first-party rates requires deliberate provider priority.
 
 ## Data sources
@@ -134,6 +134,29 @@ estimateCostFromRow(row, {
 })
 ```
 
+## Long-context tiers
+
+A request whose **prompt** crosses a threshold is billed dearer for its whole length: `gpt-5.5` doubles input and takes output to 1.5× above 272k, Gemini 2.5 Pro does the same above 200k, and Vertex's Claude listings above 200k. 30 models in the bundled archive carry one.
+
+Selecting a tier needs the length of *one request*, and a summed row has destroyed exactly that — ten 30k requests plus one 500k request add up to the same input as eleven 70k requests, and only the first set contains a row that crossed 272k. Dividing by a request count does not recover it either; an average is not a distribution. So the tier is opt-in, per call:
+
+```ts
+// A row that is one request — an agent CLI's message log, a request-level API table.
+estimateCostUsd({ model: 'gpt-5.5', perRequest: true, ...tokens })
+estimateCostFromRow(row, { perRequest: true })
+
+// Aggregated by day/model/user: stays on the base card. This is the default.
+estimateCostUsd({ model: 'gpt-5.5', ...tokens })
+```
+
+The threshold is measured on the prompt — fresh input plus cache reads plus cache writes, which is what `promptTokensBilled(tokens)` returns. Output tokens never count toward crossing it but are billed at the tier's output rate once it is crossed, which is what the vendors' ">200K prompt" wording means. Rows that store the context length directly can pass `promptTokens` (or set the `prompt_tokens` column) and skip the derivation.
+
+Which card was applied is visible rather than folded away: `pricing.contextTierAbove` carries the threshold, and `sumEstimates` keys on it, so a workload whose long requests crossed a threshold reports two entries in `total.cards` instead of one averaged rate.
+
+Leaving `perRequest` off keeps an aggregated row on the base card, which undercharges the rare long request rather than overcharging every short one.
+
+**Tiers are historical too.** Anthropic's own >200k premium — $6/$22.50 on Sonnet 4/4.5 against a $3/$15 list — existed until 2026-03-13 and was then withdrawn; every current first-party Claude model prices the full 1M window flat. That is why a tier lives inside a `PricePeriod` rather than beside the schedule: a model has to be able to carry one for its old periods and none for its new ones. The archive backfilled the tiers it learned about into their existing periods rather than dating them at the sync, since those rates were in force before this package recorded them — a one-time migration, after which a newly-appearing tier reads as a vendor introducing a premium and gets its own period.
+
 ## Time-aware pricing
 
 Pass `at` when you know the instant the tokens were spent, `window` when the row is a sum over a range:
@@ -179,7 +202,7 @@ Five entry points cover essentially every use:
 | `estimateCostUsd(args)` | Token counts → `{ cost, low, high, pricing, basis, tokens }` |
 | `estimateCostFromRow(row, options?)` | The same, straight off a snake_case SQL row |
 | `sumEstimates(estimates)` | Fold many into a total that keeps provenance |
-| `getPriceFor(model, at?)` | Just the rate card, no token counts |
+| `getPriceFor(model, at?, promptTokens?)` | Just the rate card, no token counts |
 
 <details>
 <summary>Everything else</summary>
@@ -198,7 +221,7 @@ Standalone, no catalogue involved:
 
 | Export | Purpose |
 | --- | --- |
-| `costFromRates(rates, tokens)` / `tokensBilled(tokens)` | Pure arithmetic |
+| `costFromRates(rates, tokens)` / `tokensBilled(tokens)` / `promptTokensBilled(tokens)` | Pure arithmetic |
 | `pricingCandidates(model)` | The name normalization, exposed for reuse |
 | `modelsDevSource()` / `openRouterSource()` | Source adapters |
 | `PRICE_ANCHOR_COLUMN` / `DEFAULT_ROW_COLUMNS` | The SQL-side contract |
@@ -237,8 +260,9 @@ total.cards // every rate that contributed, with how much each did
 
 ## Known limits
 
-- **Long-context tiers are ignored.** models.dev publishes `context_over_200k` rates (often 2× list) and OpenAI charges them. Selecting between tiers needs the context length of each individual request, which aggregated usage rows no longer carry.
-- **Batch, priority and committed-throughput discounts are not modelled.**
+- **Long-context tiers need `perRequest`.** They are modelled and priced (see [Long-context tiers](#long-context-tiers)), but only for rows the caller declares to be a single request. An aggregated row cannot say whether any individual request crossed a threshold, so it stays on the base card and undercharges the long ones.
+- **A withdrawn tier is only archived from the day it was noticed.** Anthropic's pre-2026-03-13 >200k premium on Sonnet 4/4.5 is not in the archive: upstream publishes today's prices, and when a premium is withdrawn the tier disappears from the feed along with its history. Pricing those rows correctly needs a hand-written override with the right effective window.
+- **Batch, priority and committed-throughput discounts are not modelled.** Nor is the 1.1× `inference_geo: "us"` / regional-endpoint multiplier.
 - **A blend weights by wall-clock time, not by usage.** Rows summed over a window no longer say which hours their tokens were spent in, so `blended` assumes they were spread evenly. Measured against a real store's DeepSeek traffic, 27.45% of tokens landed in peak hours against the 29.17% a uniform day implies — a 1.35% overstatement there, but the bound is the full [off-peak, peak] interval, which `low`/`high` now report rather than leave implicit. Group by UTC hour to remove the assumption entirely.
 - **Token nesting cannot be inferred from the model.** Which counts contain which is a property of the producer, and for reasoning not even a constant one. `inferShape` recovers the output side from a row's own total; the input side is genuinely unrecoverable and has to be declared. See [Token shapes](#token-shapes).
 

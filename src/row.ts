@@ -64,6 +64,12 @@ export interface RowColumns {
    */
   totalTokens: string
   priceAnchor: string
+  /**
+   * Optional column carrying the request's prompt length, used only to
+   * select a long-context tier. Read only under `perRequest`; when the
+   * column is absent or non-positive the length is derived from the counts.
+   */
+  promptTokens: string
 }
 
 export const DEFAULT_ROW_COLUMNS: RowColumns = {
@@ -78,6 +84,7 @@ export const DEFAULT_ROW_COLUMNS: RowColumns = {
   reasoningOutputTokens: 'reasoning_output_tokens',
   totalTokens: 'total_tokens',
   priceAnchor: PRICE_ANCHOR_COLUMN,
+  promptTokens: 'prompt_tokens',
 }
 
 /**
@@ -198,6 +205,15 @@ export interface RowOptions {
    * See `inferTokenShape` for why per-source alone is not safe here.
    */
   inferShape?: boolean
+  /**
+   * Whether each row describes a single request rather than a sum. Off by
+   * default; see `EstimateArgs.perRequest` for why this cannot be inferred.
+   *
+   * Set it for a table whose grain is one row per request, and long-context
+   * tiers apply. Leave it off for anything grouped by day, model, or user —
+   * the tier threshold is per request, and a sum no longer knows.
+   */
+  perRequest?: boolean
 }
 
 /**
@@ -209,11 +225,15 @@ export function estimateCostFromRow(
   row: Record<string, unknown>,
   options: RowOptions = {},
 ): CostEstimate {
-  const { window, columns = DEFAULT_ROW_COLUMNS, shape = {}, inferShape = false } = options
+  const { window, columns = DEFAULT_ROW_COLUMNS, shape = {}, inferShape = false, perRequest = false } = options
   const anchor = row[columns.priceAnchor]
   const at = anchor === null || anchor === undefined
     ? undefined
     : anchorToMs(rowNum(anchor))
+  // Only consulted under `perRequest`, and only when it holds a real length:
+  // a 0 or missing column means "derive it from the counts", not "this
+  // request had no prompt", which would price every row at the base card.
+  const promptTokens = perRequest ? rowNum(row[columns.promptTokens]) || undefined : undefined
   return catalog.estimate({
     model: String(row[columns.model] ?? 'unknown'),
     inputTokens: rowNum(row[columns.inputTokens]),
@@ -232,5 +252,7 @@ export function estimateCostFromRow(
     ...(inferShape ? inferTokenShape(row, columns) : undefined),
     at,
     window,
+    perRequest,
+    promptTokens,
   })
 }

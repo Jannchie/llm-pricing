@@ -1,4 +1,4 @@
-import type { NormalizedSchedule, PriceBasis, PricePeriod, PriceSchedule, Rates, TimeInput } from './types'
+import type { ContextTier, NormalizedSchedule, PriceBasis, PricePeriod, PriceSchedule, Rates, TimeInput } from './types'
 import { weightedRates } from './rates'
 import { DAY_MS, HOUR_MS } from './types'
 
@@ -31,6 +31,22 @@ export function isTimeSensitive(schedule: PriceSchedule): boolean {
   return false
 }
 
+/**
+ * Whether any period of this schedule prices by prompt size at all.
+ *
+ * Lets callers that memoise a resolution leave prompt length out of their
+ * key for the ~97% of models with no tiers, where it cannot change the
+ * answer.
+ */
+export function hasContextTiers(schedule: PriceSchedule): boolean {
+  for (const period of schedule.periods) {
+    if (period.contextTiers && period.contextTiers.length > 0) {
+      return true
+    }
+  }
+  return false
+}
+
 export function periodAt(schedule: NormalizedSchedule, atMs: number): PricePeriod {
   let current = schedule.periods[0]!
   for (const period of schedule.periods) {
@@ -51,13 +67,46 @@ export function isPeakHour(windows: Array<[number, number]>, atMs: number): bool
   return windows.some(([start, end]) => hour >= start && hour < end)
 }
 
-/** Exact rate card at one instant. */
-export function ratesAt(schedule: NormalizedSchedule, atMs: number): Rates {
-  const period = periodAt(schedule, atMs)
-  if (period.peak && isPeakHour(period.peak.windowsUtc, atMs)) {
+/**
+ * The tier a prompt of `promptTokens` falls in, or null for the base card.
+ *
+ * `undefined` promptTokens means the caller did not state that this row is
+ * one request, so no tier can be selected — see `EstimateArgs.perRequest`.
+ * Ascending order is a `normalizeSchedule` invariant, so the last match is
+ * the highest one cleared.
+ */
+export function contextTierFor(period: PricePeriod, promptTokens: number | undefined): ContextTier | null {
+  if (promptTokens === undefined || !period.contextTiers) {
+    return null
+  }
+  let hit: ContextTier | null = null
+  for (const tier of period.contextTiers) {
+    if (promptTokens > tier.abovePromptTokens) {
+      hit = tier
+    }
+    else {
+      break
+    }
+  }
+  return hit
+}
+
+/**
+ * The one card a period resolves to: peak window first, then prompt size.
+ *
+ * The two never co-occur (`normalizeSchedule` enforces it), so this is a
+ * pair of independent branches rather than a matrix.
+ */
+function cardFor(period: PricePeriod, atMs: number | undefined, promptTokens: number | undefined): Rates {
+  if (atMs !== undefined && period.peak && isPeakHour(period.peak.windowsUtc, atMs)) {
     return period.peak.rates
   }
-  return period.rates
+  return contextTierFor(period, promptTokens)?.rates ?? period.rates
+}
+
+/** Exact rate card at one instant. */
+export function ratesAt(schedule: NormalizedSchedule, atMs: number, promptTokens?: number): Rates {
+  return cardFor(periodAt(schedule, atMs), atMs, promptTokens)
 }
 
 /**
@@ -98,12 +147,13 @@ export function blendParts(
   schedule: NormalizedSchedule,
   fromMs: number,
   toMs: number,
+  promptTokens?: number,
 ): Array<{ rates: Rates, weight: number }> {
   // An unbounded (all-time) window would give ancient rates unbounded
   // weight; a year of lookback is enough for any live schedule.
   const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
   if (!(toMs > start)) {
-    return [{ rates: ratesAt(schedule, start), weight: 1 }]
+    return [{ rates: ratesAt(schedule, start, promptTokens), weight: 1 }]
   }
   const parts: Array<{ rates: Rates, weight: number }> = []
   const periods = schedule.periods
@@ -121,7 +171,9 @@ export function blendParts(
       parts.push({ rates: period.peak.rates, weight: peakMs }, { rates: period.rates, weight: span - peakMs })
     }
     else {
-      parts.push({ rates: period.rates, weight: span })
+      // A period with tiers has no peak, so its whole span pays whichever
+      // single card the prompt selects.
+      parts.push({ rates: contextTierFor(period, promptTokens)?.rates ?? period.rates, weight: span })
     }
   }
   // `parts` is never empty: the first period opens at -Infinity and
@@ -138,8 +190,8 @@ export function blendParts(
  * the time axis has already been aggregated away. Callers that *do* have a
  * timestamp pass `at` instead and get the exact rate.
  */
-export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number): Rates {
-  return weightedRates(blendParts(schedule, fromMs, toMs))
+export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number, promptTokens?: number): Rates {
+  return weightedRates(blendParts(schedule, fromMs, toMs, promptTokens))
 }
 
 /**
@@ -157,6 +209,13 @@ export interface ResolvedRates {
    * card and has nothing to bound.
    */
   cards?: Rates[]
+  /**
+   * The long-context threshold this resolution crossed, when it crossed
+   * one. On a blend, set only when every segment that carried weight landed
+   * in the same tier — otherwise the averaged card belongs to no single
+   * tier and claiming one would be a lie about which rate was applied.
+   */
+  tierAbove?: number
 }
 
 /**
@@ -169,13 +228,22 @@ export function ratesFor(
   at: TimeInput,
   window: readonly [TimeInput, TimeInput] | undefined,
   now: number = Date.now(),
+  promptTokens?: number,
 ): ResolvedRates {
   if (!isTimeSensitive(schedule)) {
-    return { rates: schedule.periods[0]!.rates, basis: 'flat' }
+    // Flat in time, which is nearly every model — but not necessarily flat
+    // in prompt size, so the tier still has to be selected here. `basis`
+    // stays 'flat': it describes how the *time* axis was resolved, and a
+    // tiered flat schedule is still exact rather than averaged.
+    const period = schedule.periods[0]!
+    const tier = contextTierFor(period, promptTokens)
+    return tier
+      ? { rates: tier.rates, basis: 'flat', tierAbove: tier.abovePromptTokens }
+      : { rates: period.rates, basis: 'flat' }
   }
   const atMs = toMs(at)
   if (atMs !== null) {
-    return { rates: ratesAt(schedule, atMs), basis: 'exact' }
+    return exactAt(schedule, atMs, promptTokens)
   }
   const from = window ? toMs(window[0]) : null
   const until = window ? toMs(window[1]) : null
@@ -185,7 +253,7 @@ export function ratesFor(
   // last 365 days, which under-charges any model whose price has since
   // risen and made the two entry points disagree on the same row.
   if (from === null && until === null) {
-    return { rates: ratesAt(schedule, now), basis: 'exact' }
+    return exactAt(schedule, now, promptTokens)
   }
   const begin = from ?? Number.NEGATIVE_INFINITY
   const end = until ?? now
@@ -193,12 +261,12 @@ export function ratesFor(
   // still names the same interval; zero-width, it names an instant and
   // there is nothing to average.
   if (begin === end) {
-    return { rates: ratesAt(schedule, begin), basis: 'exact' }
+    return exactAt(schedule, begin, promptTokens)
   }
   // A window is an interval, not an ordered pair, so normalise it before
   // blending rather than duplicating the call.
   const [lo, hi] = begin > end ? [end, begin] : [begin, end]
-  const parts = blendParts(schedule, lo, hi)
+  const parts = blendParts(schedule, lo, hi, promptTokens)
   return {
     rates: weightedRates(parts),
     basis: 'blended',
@@ -206,5 +274,55 @@ export function ratesFor(
     // widen the interval either — a period the window merely touches the
     // boundary of is not a price this row could have paid.
     cards: parts.filter(part => part.weight > 0).map(part => part.rates),
+    tierAbove: blendedTierAbove(schedule, lo, hi, promptTokens),
   }
+}
+
+/** The one card in force at an instant, plus which tier produced it. */
+function exactAt(schedule: NormalizedSchedule, atMs: number, promptTokens: number | undefined): ResolvedRates {
+  return {
+    rates: ratesAt(schedule, atMs, promptTokens),
+    basis: 'exact',
+    tierAbove: contextTierFor(periodAt(schedule, atMs), promptTokens)?.abovePromptTokens,
+  }
+}
+
+/**
+ * The tier a blended card can honestly claim: the common one, or none.
+ *
+ * A window spanning the day Anthropic withdrew its >200k premium averages a
+ * tiered period with an untiered one, and the result is neither. Reporting
+ * the tier there would name a rate the row did not pay.
+ */
+function blendedTierAbove(
+  schedule: NormalizedSchedule,
+  fromMs: number,
+  toMs: number,
+  promptTokens: number | undefined,
+): number | undefined {
+  if (promptTokens === undefined) {
+    return undefined
+  }
+  let common: number | undefined
+  let first = true
+  const periods = schedule.periods
+  // The same lookback `blendParts` applies, so the two agree on which
+  // periods carried weight — a period it gave none cannot veto the tier.
+  const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
+  for (let i = 0; i < periods.length; i++) {
+    const period = periods[i]!
+    const next = periods[i + 1]
+    if (!(Math.min(toMs, next ? next.from : Number.POSITIVE_INFINITY) > Math.max(start, period.from))) {
+      continue
+    }
+    const tier = contextTierFor(period, promptTokens)?.abovePromptTokens
+    if (first) {
+      common = tier
+      first = false
+    }
+    else if (common !== tier) {
+      return undefined
+    }
+  }
+  return common
 }

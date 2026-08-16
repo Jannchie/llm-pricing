@@ -1,12 +1,15 @@
 // Core value types. Everything here is data — no I/O, no state.
 //
-// A price is a *schedule*, not a number. Two time dimensions exist:
+// A price is a *schedule*, not a number. Three dimensions exist — two of
+// time, one of scale:
 //
 //   1. Effective dates — a provider changing its rate must not re-price
 //      history. DeepSeek's 2026-08-16 change raises every rate, so
 //      applying it retroactively would overstate old months by up to 4.7x.
 //   2. Time of day — DeepSeek bills peak and off-peak rates depending on
 //      the UTC hour a request lands in.
+//   3. Prompt size — a request whose prompt exceeds a threshold is billed
+//      at a dearer card for its whole length. See `ContextTier`.
 //
 // Everything else in the catalogue has a single flat period and pays no
 // cost for those dimensions existing: `ratesFor` short-circuits to the
@@ -71,6 +74,43 @@ export type ModelPrice = Rates & {
    * first-party rates by construction and have no provider to name.
    */
   providerId?: string
+  /**
+   * The long-context tier this card came from — its `abovePromptTokens`
+   * threshold. Absent on the base card, which is what nearly every row
+   * pays. See `ContextTier`; `sumEstimates` keys on this, so a request that
+   * crossed the threshold is reported as its own line rather than averaged
+   * into the base rate.
+   */
+  contextTierAbove?: number
+}
+
+/**
+ * A dearer rate card that applies to a whole request once its **prompt**
+ * exceeds `abovePromptTokens`.
+ *
+ * Real and widely published: `gpt-5.5` doubles input and takes output to
+ * 1.5x above 272k, Gemini 2.5 Pro does the same above 200k, and so do
+ * Vertex's Claude listings. models.dev publishes these as
+ * `cost.tiers[].tier = { type: 'context', size }`.
+ *
+ * Three things this shape says deliberately:
+ *
+ * - **A full card, not a multiplier.** The ratios are not uniform — 206 of
+ *   the 375 tiers upstream are input x2 / output x1.5, but 74 are x2/x2 and
+ *   others run to x4. A multiplier would approximate all of them.
+ * - **Measured on the prompt, billed on everything.** Output tokens do not
+ *   count toward the threshold but are billed at the tier's output rate
+ *   once it is crossed — which is what the vendors' ">200K prompt" wording
+ *   means.
+ * - **Inside a period, not beside it.** Tiers are themselves historical:
+ *   Anthropic's own >200k premium ($6/$22.50 on Sonnet 4/4.5) existed until
+ *   2026-03-13 and was then withdrawn, so a schedule has to carry a tier
+ *   for its old periods and none for its new ones.
+ */
+export interface ContextTier {
+  /** Strictly greater than: a prompt of exactly this size pays the base card. */
+  abovePromptTokens: number
+  rates: Rates
 }
 
 // One contiguous slice of a model's price history. `rates` is the flat
@@ -81,6 +121,16 @@ export interface PricePeriod {
   from: number
   rates: Rates
   peak?: { windowsUtc: Array<[number, number]>, rates: Rates }
+  /**
+   * Long-context tiers, ascending by threshold; the highest one the prompt
+   * clears wins. Only consulted when the caller states the row describes a
+   * single request — see `EstimateArgs.perRequest`.
+   *
+   * Never present alongside `peak`. No vendor publishes both, and pricing
+   * one of the two dimensions away silently would be worse than refusing
+   * the combination, so `normalizeSchedule` drops the tiers and warns.
+   */
+  contextTiers?: ContextTier[]
 }
 
 export interface PriceSchedule {

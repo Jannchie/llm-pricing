@@ -74,6 +74,7 @@ console.log('catalogue:', JSON.stringify(catalog.state()))
 const per = new Map<string, { hit: number, total: number }>()
 const misses: string[] = []
 const rows: string[] = []
+let tiered = 0
 
 for (const [vendor, model] of CASES) {
   const p = catalog.getPrice(model)
@@ -89,14 +90,25 @@ for (const [vendor, model] of CASES) {
   per.set(vendor, stat)
   const inM = p ? (p.inputCostPerToken * 1e6).toFixed(3) : '-'
   const outM = p ? (p.outputCostPerToken * 1e6).toFixed(3) : '-'
-  rows.push(`${ok ? 'OK  ' : 'MISS'} ${model.padEnd(38)} ${String(p?.source ?? '-').padEnd(10)} in $${inM.padStart(8)}/M  out $${outM.padStart(8)}/M  ${p?.displayName ?? ''}`)
+  // A long-context tier is invisible in the base card, so ask for a card at a
+  // 400k prompt too and report the threshold when the two differ. Silence
+  // here would hide a whole priced dimension from the one script whose job is
+  // to notice upstream moving.
+  const long = catalog.getPrice(model, undefined, 400_000)
+  const tier = long && long.contextTierAbove !== undefined
+    ? `  >${long.contextTierAbove / 1000}k: in $${(long.inputCostPerToken * 1e6).toFixed(3)}/M out $${(long.outputCostPerToken * 1e6).toFixed(3)}/M`
+    : ''
+  if (tier) {
+    tiered++
+  }
+  rows.push(`${ok ? 'OK  ' : 'MISS'} ${model.padEnd(38)} ${String(p?.source ?? '-').padEnd(10)} in $${inM.padStart(8)}/M  out $${outM.padStart(8)}/M  ${p?.displayName ?? ''}${tier}`)
 }
 
 console.log(rows.join('\n'))
 console.log('\n--- per vendor ---')
 for (const [v, s] of [...per].sort()) console.log(`${v.padEnd(10)} ${s.hit}/${s.total}`)
 const hit = [...per.values()].reduce((a, s) => a + s.hit, 0)
-console.log(`\ntotal ${hit}/${CASES.length}`)
+console.log(`\ntotal ${hit}/${CASES.length} — ${tiered} carry a long-context tier`)
 if (misses.length > 0) {
   console.log(`\n--- misses ---\n${misses.join('\n')}`)
 }

@@ -96,7 +96,36 @@ for (const id of ['claude-opus-4-7-fast', 'claude-opus-5-fast', 'gpt-5.5-fast'])
 }
 
 // ---------------------------------------------------------------------
-section('6. Peak / off-peak (DeepSeek bills by UTC hour)')
+section('6. Long-context tiers (a 272k prompt costs double, per request)')
+// ---------------------------------------------------------------------
+// The threshold is per request, and a summed row cannot say whether any
+// individual request crossed it — so the tier is opt-in via `perRequest`.
+
+const longPrompt = {
+  model: 'gpt-5.5',
+  inputTokens: 300_000,
+  cachedInputTokens: 0,
+  outputTokens: 4000,
+}
+for (const perRequest of [false, true]) {
+  const { cost, pricing } = offline.estimate({ ...longPrompt, perRequest })
+  const tier = pricing?.contextTierAbove
+  console.log(`  perRequest: ${String(perRequest).padEnd(5)}  ${usd(cost)}  ${tier ? `> ${tier / 1000}k tier` : 'base card'}`)
+}
+
+// Output tokens are billed at the tier rate but never count toward crossing
+// it: 200k of prompt plus 200k of output stays on the base card.
+const outputHeavy = offline.estimate({
+  model: 'gpt-5.5',
+  inputTokens: 200_000,
+  cachedInputTokens: 0,
+  outputTokens: 200_000,
+  perRequest: true,
+})
+console.log(`  200k prompt + 200k output      ${outputHeavy.pricing?.contextTierAbove ? 'tiered' : 'base card'}`)
+
+// ---------------------------------------------------------------------
+section('7. Peak / off-peak (DeepSeek bills by UTC hour)')
 // ---------------------------------------------------------------------
 // 01:00-04:00 and 06:00-10:00 UTC are peak — DeepSeek's Beijing working
 // hours. No catalogue anywhere publishes this, so it lives in overrides.
@@ -118,7 +147,7 @@ const blended = offline.estimate({
 console.log(`  whole day  ${usd(blended.cost)} / MTok  (${blended.basis})`)
 
 // ---------------------------------------------------------------------
-section('7. Effective dates — history is never re-priced')
+section('8. Effective dates — history is never re-priced')
 // ---------------------------------------------------------------------
 // DeepSeek raised every rate at 2026-08-16 16:00 UTC. Rows from before
 // that keep the old price forever.
@@ -129,7 +158,7 @@ for (const day of ['2026-08-01', '2026-09-01']) {
 }
 
 // ---------------------------------------------------------------------
-section('8. Pricing SQL rows straight off the driver')
+section('9. Pricing SQL rows straight off the driver')
 // ---------------------------------------------------------------------
 // `price_hour_epoch` is emitted by your query (see README) and lets a row
 // price at the exact hour its tokens were spent.
@@ -166,7 +195,7 @@ for (const row of [
 }
 
 // ---------------------------------------------------------------------
-section('9. Adding it up without losing the provenance')
+section('10. Adding it up without losing the provenance')
 // ---------------------------------------------------------------------
 // `cost` is the only field that adds. `sumEstimates` keeps the rest.
 
@@ -189,7 +218,7 @@ for (const card of sum.cards) {
 // price and be wrong half the time.
 
 // ---------------------------------------------------------------------
-section('10. Your own prices')
+section('11. Your own prices')
 // ---------------------------------------------------------------------
 // A negotiated rate, a self-hosted model, an internal chargeback number.
 
@@ -209,7 +238,7 @@ console.log(usd(costFromRates(
 )))
 
 // ---------------------------------------------------------------------
-section('11. LIVE — going online')
+section('12. LIVE — going online')
 // ---------------------------------------------------------------------
 
 const live = new PricingCatalog({

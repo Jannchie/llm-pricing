@@ -17,7 +17,7 @@ export { SNAPSHOT_SYNCED_AT, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 export type { ParseModelsDevOptions } from './catalog/modelsdev'
 export { DEFAULT_PROVIDER_PRIORITY } from './catalog/modelsdev'
 export type { TokenCounts } from './estimate'
-export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates, tokensBilled } from './estimate'
+export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates, promptTokensBilled, tokensBilled } from './estimate'
 export { pricingCandidates } from './resolve'
 export type { RowColumns, RowOptions, TokenShape } from './row'
 export { DEFAULT_ROW_COLUMNS, inferTokenShape, PRICE_ANCHOR_COLUMN } from './row'
@@ -26,6 +26,7 @@ export { modelsDevSource, openRouterSource } from './sources'
 export type { CostTotal } from './total'
 export { sumEstimates } from './total'
 export type {
+  ContextTier,
   CostEstimate,
   ModelPrice,
   NormalizedSchedule,
@@ -105,8 +106,8 @@ export function pricingState(): PricingCatalogState {
 }
 
 /** See `PricingCatalog#getPrice`. */
-export function getPriceFor(model: string, at?: TimeInput): ModelPrice | null {
-  return getDefaultCatalog().getPrice(model, at)
+export function getPriceFor(model: string, at?: TimeInput, promptTokens?: number): ModelPrice | null {
+  return getDefaultCatalog().getPrice(model, at, promptTokens)
 }
 
 /** See `PricingCatalog#estimate`. */
