@@ -59,6 +59,64 @@ export function undotted(s: string): string {
   return s.replaceAll(/(\d)\.(\d)/g, '$1-$2')
 }
 
+// Leading `<segment>.` groups Bedrock puts in front of a model id: the
+// vendor, optionally behind a region. Matched against a list rather than a
+// pattern because `gpt-3.5-turbo` also has a dot after a leading segment,
+// and stripping there yields `5-turbo`.
+const DOTTED_ID_PREFIXES = new Set([
+  'us',
+  'eu',
+  'apac',
+  'us-gov',
+  'anthropic',
+  'meta',
+  'amazon',
+  'mistral',
+  'cohere',
+  'ai21',
+  'deepseek',
+  'stability',
+  'writer',
+  'luma',
+  'twelvelabs',
+  'qwen',
+])
+
+/**
+ * Strip the decoration a hosting platform or gateway wraps around a
+ * vendor's model id, leaving the id the price catalogues actually use.
+ *
+ * Everything here is still only a *candidate* — probed as an exact key, so
+ * an over-eager strip misses rather than mis-prices.
+ */
+function unwrapPlatformId(model: string): string {
+  let id = model
+  // Bedrock version suffix: `...-v1:0`, `...-v2:1`.
+  id = id.replace(/-v\d+:\d+$/, '')
+  // Vertex pins a release with `@`: `claude-opus-4-5@20250514`.
+  id = id.replace(/@\d{4,8}$/, '')
+  // OpenRouter appends a routing modifier — `:nitro` and `:floor` choose an
+  // endpoint for the SAME listed price, so they can be dropped. `:free` is
+  // deliberately excluded: it is a different price tier, and resolving it
+  // to the paid listing would bill a route that costs nothing.
+  if (!id.endsWith(':free')) {
+    id = id.replace(/:[a-z][\w-]*$/, '')
+  }
+  // A deep path — `publishers/anthropic/models/claude-sonnet-4-5`,
+  // `accounts/fireworks/models/kimi-k2-instruct`. The id is the last
+  // segment; `add()` only ever peels one level.
+  if (id.includes('/')) {
+    id = id.slice(id.lastIndexOf('/') + 1)
+  }
+  // Now the dotted Bedrock prefixes, outermost first.
+  let dot = id.indexOf('.')
+  while (dot > 0 && DOTTED_ID_PREFIXES.has(id.slice(0, dot))) {
+    id = id.slice(dot + 1)
+    dot = id.indexOf('.')
+  }
+  return id
+}
+
 export function pricingCandidates(model: string): string[] {
   const set = new Set<string>()
   const add = (s: string): void => {
@@ -118,6 +176,12 @@ export function pricingCandidates(model: string): string[] {
     if (base.startsWith(`${vendor}-`)) {
       addAllForms(base.slice(vendor.length + 1))
     }
+  }
+  // Hosted platforms and gateways wrap the vendor's own id in their own
+  // decoration. Peel it off and try what is underneath.
+  const unwrapped = unwrapPlatformId(base)
+  if (unwrapped !== base) {
+    addAllForms(unwrapped)
   }
   return [...set]
 }

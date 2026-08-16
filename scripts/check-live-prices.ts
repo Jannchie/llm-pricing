@@ -46,6 +46,25 @@ const CASES: Array<[string, string]> = [
   ['moonshot', 'moonshotai/kimi-k2'],
   ['amazon', 'amazon/nova-pro'],
   ['cohere', 'command-a'],
+  // Hosted platforms and gateways, which wrap the vendor id in their own
+  // decoration. The last four are expected to miss: a local model and an
+  // Azure deployment name have no listed price, `:free` must not resolve
+  // to the paid listing, and upstream lists no `kimi-k2-instruct`.
+  ['gateway', 'azure/gpt-5.5'],
+  ['gateway', 'vertex_ai/gemini-2.5-pro'],
+  ['gateway', 'openrouter/anthropic/claude-opus-4.7'],
+  ['gateway', 'groq/llama-3.3-70b-versatile'],
+  ['gateway', 'together_ai/deepseek-ai/DeepSeek-V3'],
+  ['gateway', 'anthropic.claude-opus-4-5-20250514-v1:0'],
+  ['gateway', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+  ['gateway', 'meta.llama3-3-70b-instruct-v1:0'],
+  ['gateway', 'claude-opus-4-5@20250514'],
+  ['gateway', 'publishers/anthropic/models/claude-sonnet-4-5'],
+  ['gateway', 'z-ai/glm-4.6:nitro'],
+  ['gateway', 'openai/gpt-5.5:floor'],
+  ['gateway', 'databricks-meta-llama-3-3-70b-instruct'],
+  ['gateway', 'github-copilot/gpt-5.5'],
+  ['gateway', 'Qwen/Qwen3-235B-A22B'],
 ]
 
 const catalog = getDefaultCatalog()

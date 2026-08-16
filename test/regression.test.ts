@@ -218,3 +218,48 @@ describe('a cache write must not be corrupted by a concurrent one', () => {
     expect(values).toContain(survivor)
   })
 })
+
+describe('hosted platforms and gateways wrap the vendor id', () => {
+  const catalog = new PricingCatalog({ sources: [] })
+
+  it('strips a bedrock dotted vendor prefix and version suffix', () => {
+    expect(pricingCandidates('anthropic.claude-opus-4-5-20250514-v1:0')).toContain('claude-opus-4-5')
+    expect(pricingCandidates('bedrock/anthropic.claude-3-5-haiku-20241022-v1:0')).toContain('claude-3-5-haiku')
+    expect(pricingCandidates('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toContain('claude-sonnet-4-5')
+  })
+
+  it('strips a vertex date suffix', () => {
+    expect(pricingCandidates('claude-opus-4-5@20250514')).toContain('claude-opus-4-5')
+  })
+
+  it('takes the last segment of a deep path', () => {
+    expect(pricingCandidates('publishers/anthropic/models/claude-sonnet-4-5')).toContain('claude-sonnet-4-5')
+    expect(pricingCandidates('accounts/fireworks/models/kimi-k2-instruct')).toContain('kimi-k2-instruct')
+  })
+
+  it('strips an openrouter routing modifier', () => {
+    // `:nitro` and `:floor` pick an endpoint; the listed price is the same.
+    expect(pricingCandidates('z-ai/glm-4.6:nitro')).toContain('glm-4.6')
+    expect(pricingCandidates('openai/gpt-5.5:floor')).toContain('gpt-5.5')
+  })
+
+  it('does not strip :free, which is a different price tier', () => {
+    // Resolving it to the paid listing would bill a free route.
+    expect(pricingCandidates('deepseek/deepseek-v3.2:free')).not.toContain('deepseek-v3.2')
+    expect(catalog.getPrice('deepseek/deepseek-v3.2:free')).toBeNull()
+  })
+
+  it('does not mangle a version number that merely contains a dot', () => {
+    // A blind `^segment.` strip turns `gpt-3.5-turbo` into `5-turbo`.
+    const candidates = pricingCandidates('gpt-3.5-turbo')
+    expect(candidates).toContain('gpt-3.5-turbo')
+    expect(candidates).not.toContain('5-turbo')
+  })
+
+  it('still misses what genuinely has no listed price', () => {
+    // An Azure deployment name is arbitrary, and a local Ollama model has
+    // no price at all. Inventing one would be worse than reporting none.
+    expect(catalog.getPrice('my-gpt5-deployment')).toBeNull()
+    expect(catalog.getPrice('ollama/llama3')).toBeNull()
+  })
+})
