@@ -1,7 +1,7 @@
 {
   "name": "llm-pricing",
   "type": "module",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Time-aware LLM token pricing: resolve a model name to a rate card and turn token counts into USD.",
   "author": "Jannchie",
   "license": "MIT",
