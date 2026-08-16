@@ -175,6 +175,8 @@ The pieces the package is built from — catalogue parsers (`parseModelsDev`), t
 
 They are there so the package can be extended, not so it can be used. **Their signatures track whatever the internals need and can change in a minor release.** Everything on the main entry is covered by semver.
 
+The schedule primitives accept only a `NormalizedSchedule` — what `normalizeSchedule` returns. They run once per priced row and so validate nothing themselves; the brand is what makes "already checked" a fact the compiler enforces rather than a convention. A schedule that reaches them unvalidated can crash (a history not reaching back to `-Infinity` leaves `blendRates` with nothing to average) or silently answer from the wrong era.
+
 ## Known limits
 
 - **Long-context tiers are ignored.** models.dev publishes `context_over_200k` rates (often 2× list) and OpenAI charges them. Selecting between tiers needs the context length of each individual request, which aggregated usage rows no longer carry.
@@ -185,7 +187,7 @@ They are there so the package can be extended, not so it can be used. **Their si
 
 ```bash
 pnpm install
-pnpm test        # 177 tests, no network
+pnpm test        # 181 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

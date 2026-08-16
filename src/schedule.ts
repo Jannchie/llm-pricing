@@ -1,4 +1,4 @@
-import type { PriceBasis, PricePeriod, PriceSchedule, Rates, TimeInput } from './types'
+import type { NormalizedSchedule, PriceBasis, PricePeriod, PriceSchedule, Rates, TimeInput } from './types'
 import { weightedRates } from './rates'
 import { DAY_MS, HOUR_MS } from './types'
 
@@ -31,7 +31,7 @@ export function isTimeSensitive(schedule: PriceSchedule): boolean {
   return false
 }
 
-export function periodAt(schedule: PriceSchedule, atMs: number): PricePeriod {
+export function periodAt(schedule: NormalizedSchedule, atMs: number): PricePeriod {
   let current = schedule.periods[0]!
   for (const period of schedule.periods) {
     if (period.from <= atMs) {
@@ -52,7 +52,7 @@ export function isPeakHour(windows: Array<[number, number]>, atMs: number): bool
 }
 
 /** Exact rate card at one instant. */
-export function ratesAt(schedule: PriceSchedule, atMs: number): Rates {
+export function ratesAt(schedule: NormalizedSchedule, atMs: number): Rates {
   const period = periodAt(schedule, atMs)
   if (period.peak && isPeakHour(period.peak.windowsUtc, atMs)) {
     return period.peak.rates
@@ -96,7 +96,7 @@ export function peakMsBetween(windows: Array<[number, number]>, fromMs: number, 
  * the time axis has already been aggregated away. Callers that *do* have a
  * timestamp pass `at` instead and get the exact rate.
  */
-export function blendRates(schedule: PriceSchedule, fromMs: number, toMs: number): Rates {
+export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number): Rates {
   // An unbounded (all-time) window would give ancient rates unbounded
   // weight; a year of lookback is enough for any live schedule.
   const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
@@ -133,7 +133,7 @@ export function blendRates(schedule: PriceSchedule, fromMs: number, toMs: number
  * with a flat schedule, which is nearly all of them.
  */
 export function ratesFor(
-  schedule: PriceSchedule,
+  schedule: NormalizedSchedule,
   at: TimeInput,
   window: readonly [TimeInput, TimeInput] | undefined,
   now: number = Date.now(),

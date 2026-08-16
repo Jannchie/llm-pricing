@@ -9,9 +9,11 @@ import { PricingCatalog } from '../src/catalog'
 import { parseOpenRouterModels } from '../src/catalog/openrouter'
 import { costFromRates } from '../src/estimate'
 import { fileCache } from '../src/node'
+import { normalizeSchedule } from '../src/normalize'
 import { flatSchedule, mergeLiveQuote } from '../src/rates'
 import { pricingCandidates } from '../src/resolve'
 import { PRICE_ANCHOR_COLUMN } from '../src/row'
+import { periodAt, ratesFor } from '../src/schedule'
 
 // Each of these reproduces a defect found by review. They are grouped by
 // what actually goes wrong for a caller, not by which file holds the bug.
@@ -489,5 +491,72 @@ describe('a long-lived process must not grow without bound', () => {
     expect(catalog.resolvedSize).toBeLessThanOrEqual(50_000)
     // ...and it still works afterwards.
     expect(catalog.getPrice('claude-opus-5')?.inputCostPerToken).toBe(5e-6)
+  })
+})
+
+describe('a schedule whose history does not reach back far enough', () => {
+  // `PriceSchedule.periods` documents that the first entry opens at
+  // -Infinity so any timestamp resolves. Nothing enforced it, and both
+  // consumers of a schedule break differently when it does not hold.
+  const late = [
+    { from: Date.UTC(2026, 0, 1), rates: rates(10) },
+    { from: Date.UTC(2026, 6, 1), rates: rates(20) },
+  ]
+
+  it('prices a row from before the first period instead of crashing', () => {
+    const catalog = build(late)
+    // `blendRates` clips every period to the window, so a window entirely
+    // before the first period leaves it with nothing to average — and it
+    // documents that this cannot happen.
+    const price = catalog.getPrice('m')
+    expect(price).not.toBeNull()
+    const { cost } = catalog.estimate({
+      model: 'm',
+      window: [Date.UTC(2025, 0, 1), Date.UTC(2025, 5, 1)],
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    })
+    // The earliest rate we know about is the honest answer for a row that
+    // predates the archive; anything else invents a price.
+    expect(cost).toBeCloseTo(10, 6)
+  })
+
+  it('anchors the first period at -infinity so an instant before it resolves', () => {
+    const catalog = build(late)
+    const { cost } = catalog.estimate({
+      model: 'm',
+      at: Date.UTC(2025, 0, 1),
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    })
+    expect(cost).toBeCloseTo(10, 6)
+  })
+})
+
+describe('an unvalidated schedule must not reach the pricing primitives', () => {
+  // The primitives run once per priced row and so check nothing — that is
+  // why validation happens at ingest. Before `NormalizedSchedule` existed
+  // only a comment said so, and two producers (`mergeLiveQuote`,
+  // `scaleSchedule`) did in fact bypass the gate. These assertions fail to
+  // compile if the brand is ever dropped: `@ts-expect-error` is itself an
+  // error when the line it guards type-checks.
+  const raw: PriceSchedule = {
+    source: 'fallback',
+    periods: [{ from: Number.NEGATIVE_INFINITY, rates: rates(1) }],
+  }
+
+  it('is a type error to price one directly', () => {
+    // @ts-expect-error a raw PriceSchedule has not been through the gate
+    expect(() => ratesFor(raw, Date.now(), undefined)).not.toThrow()
+    // @ts-expect-error ...and neither has one the caller hand-built
+    expect(() => periodAt(raw, Date.now())).not.toThrow()
+  })
+
+  it('accepts the same schedule once it has been normalised', () => {
+    const gated = normalizeSchedule(raw)!
+    expect(ratesFor(gated, Date.now(), undefined).basis).toBe('flat')
+    expect(periodAt(gated, Date.now()).rates.inputCostPerToken).toBe(1e-6)
   })
 })

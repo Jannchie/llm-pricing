@@ -2,7 +2,7 @@ import type { PricingCache } from './cache'
 import type { TokenCounts } from './estimate'
 import type { RowColumns } from './row'
 import type { PricingSource } from './sources'
-import type { CostEstimate, ModelPrice, PriceSchedule, Rates, TimeInput } from './types'
+import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
@@ -123,8 +123,8 @@ const RESOLVED_LIMIT = 50_000
 function normalizeTable(
   table: Record<string, PriceSchedule>,
   onWarn: (message: string, error: unknown) => void,
-): Record<string, PriceSchedule> {
-  const out: Record<string, PriceSchedule> = {}
+): Record<string, NormalizedSchedule> {
+  const out: Record<string, NormalizedSchedule> = {}
   for (const [id, schedule] of Object.entries(table)) {
     const normalized = normalizeSchedule(schedule, onWarn, id)
     if (normalized) {
@@ -142,8 +142,8 @@ export class PricingCatalog {
   private readonly cacheTtlMs: number
   private readonly fetchImpl: typeof globalThis.fetch
   private readonly timeoutMs: number
-  private readonly overrides: Record<string, PriceSchedule>
-  private readonly fallback: Record<string, PriceSchedule>
+  private readonly overrides: Record<string, NormalizedSchedule>
+  private readonly fallback: Record<string, NormalizedSchedule>
   private readonly onWarn: (message: string, error: unknown) => void
   private readonly archiveObservedAt: number
 
@@ -160,7 +160,7 @@ export class PricingCatalog {
    * and every miss re-runs the whole candidate expansion. Invalidated
    * wherever `remote` is reassigned.
    */
-  private readonly resolved = new Map<string, PriceSchedule | null>()
+  private readonly resolved = new Map<string, NormalizedSchedule | null>()
 
   /** Entries currently memoised. Exposed for tests and diagnostics. */
   get resolvedSize(): number {
@@ -444,7 +444,7 @@ export class PricingCatalog {
     }
   }
 
-  getSchedule(model: string): PriceSchedule | null {
+  getSchedule(model: string): NormalizedSchedule | null {
     if (!model) {
       return null
     }

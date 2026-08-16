@@ -26,6 +26,7 @@ export { modelsDevSource, openRouterSource } from './sources'
 export type {
   CostEstimate,
   ModelPrice,
+  NormalizedSchedule,
   PriceBasis,
   PricePeriod,
   PriceSchedule,

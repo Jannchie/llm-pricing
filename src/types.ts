@@ -91,6 +91,26 @@ export interface PriceSchedule {
   sqlMatch?: string[]
 }
 
+declare const NORMALIZED: unique symbol
+
+/**
+ * A schedule that has been through `normalizeSchedule`, and so keeps every
+ * promise the comments above make: at least one period, ascending by `from`,
+ * the first opening at -Infinity, and peak windows that are real, disjoint
+ * UTC hours.
+ *
+ * The primitives that read a schedule run once per priced row and therefore
+ * check nothing — which is the whole reason validation happens at ingest.
+ * This brand is what keeps that from being a convention: they accept only
+ * this type, so no schedule can reach them without passing the gate.
+ * `mergeLiveQuote` and `scaleSchedule` both produced schedules that skipped
+ * it while nothing but a comment said they should not.
+ *
+ * There is no way to make one except through `normalizeSchedule`, exported
+ * from `llm-pricing/internal` for anyone extending the package.
+ */
+export type NormalizedSchedule = PriceSchedule & { readonly [NORMALIZED]: true }
+
 export type TimeInput = number | string | Date | null | undefined
 
 /**

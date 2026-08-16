@@ -1,5 +1,6 @@
-import type { PriceSchedule, Rates } from '../src/types'
+import type { Rates } from '../src/types'
 import { describe, expect, it } from 'vitest'
+import { normalizeSchedule } from '../src/normalize'
 import {
   blendRates,
   isPeakHour,
@@ -25,18 +26,22 @@ function rates(n: number): Rates {
 const WINDOWS: Array<[number, number]> = [[1, 4], [6, 10]]
 const CUTOVER = Date.UTC(2026, 7, 16, 16, 0, 0)
 
-const scheduled: PriceSchedule = {
+// Built the way production builds them: these primitives now accept only a
+// schedule that has been through the gate, so the fixtures go through it too
+// and the tests exercise exactly what ships.
+const scheduled = normalizeSchedule({
   source: 'override',
+  sqlMatch: ['%x%'],
   periods: [
     { from: Number.NEGATIVE_INFINITY, rates: rates(1) },
     { from: CUTOVER, rates: rates(10), peak: { windowsUtc: WINDOWS, rates: rates(20) } },
   ],
-}
+})!
 
-const flat: PriceSchedule = {
+const flat = normalizeSchedule({
   source: 'fallback',
   periods: [{ from: Number.NEGATIVE_INFINITY, rates: rates(3) }],
-}
+})!
 
 describe('toms', () => {
   it('accepts numbers, dates and iso strings', () => {

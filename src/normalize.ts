@@ -1,4 +1,4 @@
-import type { PricePeriod, PriceSchedule } from './types'
+import type { NormalizedSchedule, PricePeriod, PriceSchedule } from './types'
 import { isTimeSensitive } from './schedule'
 
 /**
@@ -17,7 +17,7 @@ export function normalizeSchedule(
   schedule: PriceSchedule,
   onWarn?: (message: string, error: unknown) => void,
   id?: string,
-): PriceSchedule | null {
+): NormalizedSchedule | null {
   // One period and no peak describes essentially every model in the
   // catalogue — nothing to sort and no window to check, so return the
   // schedule itself. Worth the branch: this runs over the whole bundled
@@ -25,9 +25,9 @@ export function normalizeSchedule(
   // and rebuilding all of them would allocate a second copy of a table that
   // is otherwise shared by identity.
   const only = schedule.periods.length === 1 ? schedule.periods[0] : undefined
-  if (only && !only.peak && !Number.isNaN(only.from)) {
+  if (only && !only.peak && only.from === Number.NEGATIVE_INFINITY) {
     warnIfUnanchored(schedule, onWarn, id)
-    return schedule
+    return schedule as NormalizedSchedule
   }
 
   const usable = schedule.periods.filter(period => !Number.isNaN(period.from))
@@ -53,7 +53,23 @@ export function normalizeSchedule(
       : { ...period, peak: { ...period.peak, windowsUtc } }
   })
 
-  const result = { ...schedule, periods }
+  // The first period must open at -Infinity. `periodAt` already falls back
+  // to it for any earlier instant, but `blendRates` clips each period to the
+  // window and is left with nothing to average — it throws rather than
+  // returning a price, and its own comment says that cannot happen. Opening
+  // the earliest known rate at -Infinity makes the two agree, and it is the
+  // only defensible answer for a row that predates the schedule: any other
+  // invents a price nobody quoted.
+  const first = periods[0]!
+  if (first.from !== Number.NEGATIVE_INFINITY) {
+    onWarn?.(
+      `schedule "${id ?? schedule.displayName ?? '?'}" begins at ${new Date(first.from).toISOString()}; opening it at -infinity so earlier rows still price`,
+      undefined,
+    )
+    periods[0] = { ...first, from: Number.NEGATIVE_INFINITY }
+  }
+
+  const result = { ...schedule, periods } as NormalizedSchedule
   warnIfUnanchored(result, onWarn, id)
   return result
 }

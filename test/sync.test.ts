@@ -106,11 +106,13 @@ describe('the list the script actually archives with', () => {
     // script feeds `mergeSnapshot` the very list `parseModelsDev` ranks by.
     // With no second copy left to drift, what is worth asserting is that the
     // ordering does its job across the whole list: every provider quotes the
-    // same id, worst-first in the payload, and the winner must still be the
-    // one at the head of the priority list.
+    // same id, and the winner must be the one at the head of the priority
+    // list rather than the cheapest or the first key in the payload.
     const listings: Record<string, { models: Record<string, { name: string, cost: { input: number, output: number } }> }> = {}
-    for (const [i, provider] of DEFAULT_PROVIDER_PRIORITY.toReversed().entries()) {
-      listings[provider] = { models: { shared: { name: provider, cost: { input: i + 1, output: 1 } } } }
+    // Priced so the head of the list is the *most expensive* quote: what
+    // wins must be the priority order, not the number.
+    for (const [i, provider] of DEFAULT_PROVIDER_PRIORITY.entries()) {
+      listings[provider] = { models: { shared: { name: provider, cost: { input: DEFAULT_PROVIDER_PRIORITY.length - i, output: 1 } } } }
     }
     const { models } = mergeSnapshot({}, listings, DEFAULT_PROVIDER_PRIORITY, '2026-08-16')
     expect(models.shared![0]).toBe(DEFAULT_PROVIDER_PRIORITY[0])
