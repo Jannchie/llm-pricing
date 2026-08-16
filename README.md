@@ -165,7 +165,8 @@ Standalone, no catalogue involved:
 
 | Export | Purpose |
 | --- | --- |
-| `costFromRates(rates, tokens)` | Pure arithmetic |
+| `sumEstimates(estimates)` | Fold estimates into a total that keeps provenance |
+| `costFromRates(rates, tokens)` / `tokensBilled(tokens)` | Pure arithmetic |
 | `pricingCandidates(model)` | The name normalization, exposed for reuse |
 | `modelsDevSource()` / `openRouterSource()` | Source adapters |
 | `PRICE_ANCHOR_COLUMN` / `DEFAULT_ROW_COLUMNS` | The SQL-side contract |
@@ -180,10 +181,31 @@ They are there so the package can be extended, not so it can be used. **Their si
 
 The schedule primitives accept only a `NormalizedSchedule` — what `normalizeSchedule` returns. They run once per priced row and so validate nothing themselves; the brand is what makes "already checked" a fact the compiler enforces rather than a convention. A schedule that reaches them unvalidated can crash (a history not reaching back to `-Infinity` leaves `blendRates` with nothing to average) or silently answer from the wrong era.
 
+## Adding up
+
+Cost is the only part of an estimate that adds. The card that priced it, how that card was arrived at, and whether the model was known at all do not — so a caller folding rows with `+=` loses all three at the first `+`, and the accumulator they write instead usually keeps the *last* card it saw and calls it the model's price. That is true only when every row of a model shares one card, which is exactly false for the models this package works hardest on: a DeepSeek model spanning peak and off-peak has two, a factor of two apart.
+
+```ts
+import { sumEstimates } from 'llm-pricing'
+
+const total = sumEstimates(rows.map(row => estimateCostFromRow(row, options)))
+
+total.cost // what to display
+total.high // ...and total.low: the interval it could actually be
+total.unpriced.tokens // usage this total is reporting as $0
+total.byBasis.blended // the share an hour-grouped query would sharpen
+total.cards // every rate that contributed, with how much each did
+```
+
+`low`/`high` are on each estimate too, and are real prices rather than an error bar: cost is linear in the rates, so a blend's cost is the same weighted average of its cards' costs and can never fall outside them. For a flat or exact estimate all three are equal, so a total only shows a range when something in it genuinely has one.
+
+`unpriced` is the counterweight to `cost: 0`. An unknown model contributes nothing to the total and the total still looks complete; this is how much usage that zero is standing in for.
+
 ## Known limits
 
 - **Long-context tiers are ignored.** models.dev publishes `context_over_200k` rates (often 2× list) and OpenAI charges them. Selecting between tiers needs the context length of each individual request, which aggregated usage rows no longer carry.
 - **Batch, priority and committed-throughput discounts are not modelled.**
+- **A blend weights by wall-clock time, not by usage.** Rows summed over a window no longer say which hours their tokens were spent in, so `blended` assumes they were spread evenly. Measured against a real store's DeepSeek traffic, 27.45% of tokens landed in peak hours against the 29.17% a uniform day implies — a 1.35% overstatement there, but the bound is the full [off-peak, peak] interval, which `low`/`high` now report rather than leave implicit. Group by UTC hour to remove the assumption entirely.
 - **Reasoning nesting is producer-dependent, and not reliably so.** OpenAI and Anthropic fold reasoning into `output_tokens`, so it is not billed twice. Gemini reports it beside the output count and charges for it — pass `reasoningIncludedInOutput: false` for those rows or the thinking tokens are dropped. But a per-source rule is not enough: real stores contain both conventions from one source, one model and one day. Rows carrying `total_tokens` should use `inferShape` instead, which reads the answer off each row.
 
 ## Development

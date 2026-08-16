@@ -26,6 +26,7 @@ export {
 } from './rates'
 export { dotted, undotted } from './resolve'
 export {
+  blendParts,
   blendRates,
   isPeakHour,
   isTimeSensitive,

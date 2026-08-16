@@ -113,7 +113,7 @@ export function mergeLiveQuote(
   if (ratesEqual(latest.rates, live.periods.at(-1)!.rates)) {
     // The catalogue confirms what the archive already knew. Keep the
     // history, but credit the live source — it is what was consulted.
-    return { ...archive, displayName: live.displayName ?? archive.displayName, source: live.source }
+    return { ...archive, displayName: live.displayName ?? archive.displayName, source: live.source, providerId: live.providerId }
   }
   const liveRates = live.periods.at(-1)!.rates
   const periods = observedFromMs > latest.from
@@ -124,6 +124,7 @@ export function mergeLiveQuote(
   return {
     displayName: live.displayName ?? archive.displayName,
     source: live.source,
+    providerId: live.providerId,
     periods,
     sqlMatch: periods.length > 1 ? (archive.sqlMatch ?? sqlMatch) : undefined,
   }
@@ -139,6 +140,7 @@ export function scaleSchedule(base: PriceSchedule, multiplier: number, displayNa
       ? `${base.displayName} ${displayNameSuffix}`
       : base.displayName,
     source: base.source,
+    providerId: base.providerId,
     sqlMatch: base.sqlMatch,
     periods: base.periods.map(period => ({
       from: period.from,

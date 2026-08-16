@@ -6,7 +6,7 @@ import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
-import { costFromRates } from './estimate'
+import { costFromRates, tokensBilled } from './estimate'
 import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
@@ -536,7 +536,12 @@ export class PricingCatalog {
     if (cached) {
       return cached
     }
-    const card: ModelPrice = { ...rates, displayName: schedule.displayName, source: schedule.source }
+    const card: ModelPrice = {
+      ...rates,
+      displayName: schedule.displayName,
+      source: schedule.source,
+      providerId: schedule.providerId,
+    }
     this.priceCards.set(rates, card)
     return card
   }
@@ -550,14 +555,40 @@ export class PricingCatalog {
     return this.priceCardFor(schedule, ratesFor(schedule, at ?? Date.now(), undefined).rates)
   }
 
-  /** Price a set of token counts. Returns cost 0 for an unknown model. */
+  /**
+   * Price a set of token counts.
+   *
+   * An unknown model returns cost 0 with `pricing: null` — the pair is what
+   * separates "we do not know" from "it was free", and `tokens` records how
+   * much usage that $0 is standing in for. Feed the results to
+   * `sumEstimates` rather than adding `cost` up by hand, which throws that
+   * distinction away along with the basis and the cards.
+   */
   estimate(args: EstimateArgs): CostEstimate {
+    const tokens = tokensBilled(args)
     const schedule = this.getSchedule(args.model)
     if (!schedule) {
-      return { cost: 0, pricing: null, basis: 'flat' }
+      return { cost: 0, pricing: null, basis: 'flat', low: 0, high: 0, tokens }
     }
-    const { rates, basis } = ratesFor(schedule, args.at, args.window)
-    return { cost: costFromRates(rates, args), pricing: this.priceCardFor(schedule, rates), basis }
+    const { rates, basis, cards } = ratesFor(schedule, args.at, args.window)
+    const cost = costFromRates(rates, args)
+    // Cost is linear in the rates, so the blend's cost is the same weighted
+    // average of the cards' costs — it cannot fall outside them, and these
+    // are reachable prices rather than a nominal error bar.
+    let low = cost
+    let high = cost
+    if (cards) {
+      for (const card of cards) {
+        const bound = costFromRates(card, args)
+        if (bound < low) {
+          low = bound
+        }
+        if (bound > high) {
+          high = bound
+        }
+      }
+    }
+    return { cost, pricing: this.priceCardFor(schedule, rates), basis, low, high, tokens }
   }
 
   /**

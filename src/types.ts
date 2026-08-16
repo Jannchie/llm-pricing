@@ -48,6 +48,18 @@ export type PriceSource = 'openrouter' | 'modelsdev' | 'fallback' | 'override' |
 export type ModelPrice = Rates & {
   displayName?: string
   source: PriceSource
+  /**
+   * Which provider inside `source` quoted this. `source` alone does not
+   * identify a price: models.dev carries 186 providers quoting 6,199
+   * models between them, so a bare model name collides 15-25 ways and the
+   * winner is decided by provider priority — first-party where one exists,
+   * and otherwise by whichever provider id sorts first. That tie-break is
+   * arbitrary and, without this field, invisible.
+   *
+   * Absent on the built-in tables (`fallback`, `override`), which quote
+   * first-party rates by construction and have no provider to name.
+   */
+  providerId?: string
 }
 
 // One contiguous slice of a model's price history. `rates` is the flat
@@ -63,6 +75,8 @@ export interface PricePeriod {
 export interface PriceSchedule {
   displayName?: string
   source: PriceSource
+  /** Which provider inside `source` quoted this. See `ModelPrice`. */
+  providerId?: string
   /**
    * How much this quote is trusted; lower wins. `0` means the source ranks
    * the quoting provider as first-party for this model, `1` (the default
@@ -126,6 +140,29 @@ export interface CostEstimate {
   cost: number
   pricing: ModelPrice | null
   basis: PriceBasis
+  /**
+   * What this row could have cost, at the cheapest and dearest rate card
+   * the estimate drew on.
+   *
+   * Equal to `cost` for `flat` and `exact` — there was only ever one card.
+   * For `blended` they are the off-peak and peak ends of the window, which
+   * for DeepSeek is a factor of two apart. `basis: 'blended'` says the
+   * number is approximate; these say by how much, and they cost nothing to
+   * produce because both cards were already in hand.
+   *
+   * Sound because cost is linear in the rates: blending averages the cards,
+   * so the blended cost is exactly the same average of their costs and can
+   * never fall outside them.
+   */
+  low: number
+  high: number
+  /**
+   * Tokens this estimate billed for — the quantities actually multiplied by
+   * a rate, after cache carve-outs and the reasoning convention. Zero-cost
+   * for an unpriced model, where it is the only record that real usage was
+   * counted as $0. See `sumEstimates`.
+   */
+  tokens: number
 }
 
 export const HOUR_MS = 60 * 60 * 1000

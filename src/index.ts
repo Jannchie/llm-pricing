@@ -17,12 +17,14 @@ export { SNAPSHOT_SYNCED_AT, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 export type { ParseModelsDevOptions } from './catalog/modelsdev'
 export { DEFAULT_PROVIDER_PRIORITY } from './catalog/modelsdev'
 export type { TokenCounts } from './estimate'
-export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates } from './estimate'
+export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates, tokensBilled } from './estimate'
 export { pricingCandidates } from './resolve'
 export type { RowColumns, RowOptions, TokenShape } from './row'
 export { DEFAULT_ROW_COLUMNS, inferTokenShape, PRICE_ANCHOR_COLUMN } from './row'
 export type { PricingSource } from './sources'
 export { modelsDevSource, openRouterSource } from './sources'
+export type { CostTotal } from './total'
+export { sumEstimates } from './total'
 export type {
   CostEstimate,
   ModelPrice,

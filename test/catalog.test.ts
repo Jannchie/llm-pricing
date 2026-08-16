@@ -77,7 +77,7 @@ describe('pricingcatalog offline', () => {
     expect(shadowed.getPrice('claude-opus-5')?.inputCostPerToken).toBe(5e-6)
   })
 
-  it('returns null and zero cost for an unknown model', () => {
+  it('returns null and zero cost for an unknown model, but still counts the tokens', () => {
     expect(catalog.getPrice('totally-made-up-model')).toBeNull()
     const result = catalog.estimate({
       model: 'totally-made-up-model',
@@ -85,7 +85,10 @@ describe('pricingcatalog offline', () => {
       cachedInputTokens: 0,
       outputTokens: 1e6,
     })
-    expect(result).toEqual({ cost: 0, pricing: null, basis: 'flat' })
+    // `cost: 0` with `pricing: null` is how "we do not know" is told from
+    // "it was free". `tokens` is what keeps the first one from disappearing
+    // into a sum: 2M tokens of real usage are being reported as $0 here.
+    expect(result).toEqual({ cost: 0, pricing: null, basis: 'flat', low: 0, high: 0, tokens: 2e6 })
   })
 })
 

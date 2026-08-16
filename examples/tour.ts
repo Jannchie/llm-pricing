@@ -14,6 +14,7 @@ import {
   pricingCandidates,
   PricingCatalog,
   SNAPSHOT_SYNCED_AT,
+  sumEstimates,
 } from '../src/index'
 // `flatSchedule` is a building block, not part of the public API.
 import { flatSchedule } from '../src/internal'
@@ -165,7 +166,30 @@ for (const row of [
 }
 
 // ---------------------------------------------------------------------
-section('9. Your own prices')
+section('9. Adding it up without losing the provenance')
+// ---------------------------------------------------------------------
+// `cost` is the only field that adds. `sumEstimates` keeps the rest.
+
+const mixed = [
+  offline.estimate({ model: 'claude-opus-5', inputTokens: 1e6, cachedInputTokens: 0, outputTokens: 0 }),
+  offline.estimate({ model: 'deepseek-v4-flash', ...tokens, at: Date.UTC(2026, 8, 1, 2) }), // peak
+  offline.estimate({ model: 'deepseek-v4-flash', ...tokens, at: Date.UTC(2026, 8, 1, 12) }), // off-peak
+  offline.estimate({ model: 'deepseek-v4-flash', ...tokens, window: [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 2)] }),
+  offline.estimate({ model: 'nobody-lists-this-one', inputTokens: 5e6, cachedInputTokens: 0, outputTokens: 1e6 }),
+]
+const sum = sumEstimates(mixed)
+console.log(`  cost      ${usd(sum.cost)}   (could be ${usd(sum.low)} – ${usd(sum.high)})`)
+console.log(`  by basis  flat ${usd(sum.byBasis.flat)}  exact ${usd(sum.byBasis.exact)}  blended ${usd(sum.byBasis.blended)}`)
+console.log(`  unpriced  ${sum.unpriced.count} of ${sum.count} rows, ${(sum.unpriced.tokens / 1e6).toFixed(1)}M tokens counted as $0`)
+for (const card of sum.cards) {
+  console.log(`    ${(card.pricing.displayName ?? '?').padEnd(20)} $${(card.pricing.inputCostPerToken * 1e6).toFixed(2)}/MTok  x${card.count}  ${usd(card.cost)}`)
+}
+// Note the two DeepSeek cards: one model, two prices. A `pricing` field
+// that holds only the last row seen would report one of them as "the"
+// price and be wrong half the time.
+
+// ---------------------------------------------------------------------
+section('10. Your own prices')
 // ---------------------------------------------------------------------
 // A negotiated rate, a self-hosted model, an internal chargeback number.
 
@@ -185,7 +209,7 @@ console.log(usd(costFromRates(
 )))
 
 // ---------------------------------------------------------------------
-section('10. LIVE — going online')
+section('11. LIVE — going online')
 // ---------------------------------------------------------------------
 
 const live = new PricingCatalog({

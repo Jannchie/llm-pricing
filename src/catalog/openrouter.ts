@@ -78,9 +78,14 @@ export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<strin
     const cacheWrite = num(pricing.input_cache_write) ?? cacheRead
     // OpenRouter is a point-in-time quote: one rate, valid now. It is
     // therefore always a single open-ended period.
+    const key = id.toLowerCase()
+    const slash = key.indexOf('/')
     const schedule: PriceSchedule = {
       displayName: typeof model.name === 'string' ? model.name : undefined,
       source: 'openrouter',
+      // OpenRouter's ids are always `vendor/model`, so the prefix names the
+      // vendor whose endpoint it would route to.
+      providerId: slash > 0 ? key.slice(0, slash) : undefined,
       periods: [{
         from: Number.NEGATIVE_INFINITY,
         rates: {
@@ -92,9 +97,8 @@ export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<strin
         },
       }],
     }
-    const key = id.toLowerCase()
     map.set(key, schedule)
-    const bare = key.slice(key.indexOf('/') + 1)
+    const bare = key.slice(slash + 1)
     if (bare !== key && !map.has(bare)) {
       map.set(bare, schedule)
     }

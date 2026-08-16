@@ -96,12 +96,23 @@ export function peakMsBetween(windows: Array<[number, number]>, fromMs: number, 
  * the time axis has already been aggregated away. Callers that *do* have a
  * timestamp pass `at` instead and get the exact rate.
  */
-export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number): Rates {
+/**
+ * The rate cards a blend draws on, with the wall-clock weight each carries.
+ *
+ * Separate from `blendRates` because the weighted average throws away the
+ * one thing that says how rough it is: the cards it averaged. Keeping them
+ * is what lets an estimate report the interval its true cost must lie in.
+ */
+export function blendParts(
+  schedule: NormalizedSchedule,
+  fromMs: number,
+  toMs: number,
+): Array<{ rates: Rates, weight: number }> {
   // An unbounded (all-time) window would give ancient rates unbounded
   // weight; a year of lookback is enough for any live schedule.
   const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
   if (!(toMs > start)) {
-    return ratesAt(schedule, start)
+    return [{ rates: ratesAt(schedule, start), weight: 1 }]
   }
   const parts: Array<{ rates: Rates, weight: number }> = []
   const periods = schedule.periods
@@ -124,20 +135,28 @@ export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: n
   }
   // `parts` is never empty: the first period opens at -Infinity and
   // `toMs > start` was checked above, so at least one segment has span.
-  return weightedRates(parts)
+  return parts
+}
+
+export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number): Rates {
+  return weightedRates(blendParts(schedule, fromMs, toMs))
 }
 
 /**
  * Resolve a schedule to the one flat rate card that applies, either at an
  * instant (`at`) or averaged across a window. Both are ignored for models
  * with a flat schedule, which is nearly all of them.
+ *
+ * `cards` is populated only for a blend, and holds the distinct cards that
+ * went into it — the material for a cost interval. Every other path priced
+ * against exactly one card and has nothing to bound.
  */
 export function ratesFor(
   schedule: NormalizedSchedule,
   at: TimeInput,
   window: readonly [TimeInput, TimeInput] | undefined,
   now: number = Date.now(),
-): { rates: Rates, basis: PriceBasis } {
+): { rates: Rates, basis: PriceBasis, cards?: Rates[] } {
   if (!isTimeSensitive(schedule)) {
     return { rates: schedule.periods[0]!.rates, basis: 'flat' }
   }
@@ -163,7 +182,16 @@ export function ratesFor(
   if (begin === end) {
     return { rates: ratesAt(schedule, begin), basis: 'exact' }
   }
-  return begin > end
-    ? { rates: blendRates(schedule, end, begin), basis: 'blended' }
-    : { rates: blendRates(schedule, begin, end), basis: 'blended' }
+  // A window is an interval, not an ordered pair, so normalise it before
+  // blending rather than duplicating the call.
+  const [lo, hi] = begin > end ? [end, begin] : [begin, end]
+  const parts = blendParts(schedule, lo, hi)
+  return {
+    rates: weightedRates(parts),
+    basis: 'blended',
+    // Zero-weight segments never influenced the average, so they must not
+    // widen the interval either — a period the window merely touches the
+    // boundary of is not a price this row could have paid.
+    cards: parts.filter(part => part.weight > 0).map(part => part.rates),
+  }
 }

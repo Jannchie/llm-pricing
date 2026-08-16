@@ -80,12 +80,22 @@ function count(value: unknown): number {
 }
 
 /**
- * Apply a resolved rate card to a set of token counts.
+ * The quantities a rate card is actually multiplied by, once the cache
+ * carve-outs and the two nesting conventions have been applied.
  *
- * Pure and stateless — every catalogue/schedule decision has already been
- * made by the time this runs, which is what makes it exhaustively testable.
+ * Split out so `costFromRates` and `tokensBilled` cannot disagree about
+ * what was billed — a total that contradicts the cost beside it is worse
+ * than no total at all. The object never escapes either caller.
  */
-export function costFromRates(rates: Rates, tokens: TokenCounts): number {
+interface BilledTokens {
+  fresh: number
+  creationDefault: number
+  creation1h: number
+  cacheRead: number
+  output: number
+}
+
+function billedTokens(tokens: TokenCounts): BilledTokens {
   const cacheCreation = count(tokens.cacheCreationInputTokens)
   // Split the cache-creation total by ephemeral TTL. `known1h` is clamped
   // to the total so a malformed/over-counted 1h split can never bill more
@@ -121,9 +131,33 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
   // be added, not ignored.
   const output = count(tokens.outputTokens)
     + (tokens.reasoningIncludedInOutput === false ? count(tokens.reasoningOutputTokens) : 0)
-  return fresh * rates.inputCostPerToken
-    + creationDefaultRate * rates.cacheCreationInputCostPerToken
-    + known1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
-    + cacheRead * rates.cacheReadInputCostPerToken
-    + output * rates.outputCostPerToken
+  return { fresh, creationDefault: creationDefaultRate, creation1h: known1h, cacheRead, output }
+}
+
+/**
+ * Apply a resolved rate card to a set of token counts.
+ *
+ * Pure and stateless — every catalogue/schedule decision has already been
+ * made by the time this runs, which is what makes it exhaustively testable.
+ */
+export function costFromRates(rates: Rates, tokens: TokenCounts): number {
+  const b = billedTokens(tokens)
+  return b.fresh * rates.inputCostPerToken
+    + b.creationDefault * rates.cacheCreationInputCostPerToken
+    + b.creation1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
+    + b.cacheRead * rates.cacheReadInputCostPerToken
+    + b.output * rates.outputCostPerToken
+}
+
+/**
+ * How many tokens `costFromRates` would bill for the same counts.
+ *
+ * Not the row's `total_tokens`: cache reads and fresh input are counted
+ * once each rather than twice, and reasoning is included only when it sits
+ * outside `outputTokens`. It answers "how much usage does this cost cover",
+ * which is what makes an unpriced row's $0 legible as a gap.
+ */
+export function tokensBilled(tokens: TokenCounts): number {
+  const b = billedTokens(tokens)
+  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead + b.output
 }

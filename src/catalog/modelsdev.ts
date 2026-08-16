@@ -145,6 +145,7 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
       const schedule: PriceSchedule = {
         displayName: typeof model.name === 'string' ? model.name : undefined,
         source: 'modelsdev',
+        providerId,
         tier: rank.has(providerId) ? 0 : 1,
         periods: [{
           from: Number.NEGATIVE_INFINITY,

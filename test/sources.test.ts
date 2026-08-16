@@ -192,3 +192,29 @@ describe('candidate selection prefers a first-party quote', () => {
     expect(catalog.getPrice('z-ai/glm-4.6')!.inputCostPerToken).toBeCloseTo(6e-7, 15)
   })
 })
+
+describe('a price names the provider that quoted it', () => {
+  // `source` says which feed answered, which is not the same question.
+  // models.dev alone carries 186 providers quoting 6,199 models, so a bare
+  // name resolves through a priority rule whose outcome is otherwise
+  // invisible — and unauditable when someone asks why a number is what it
+  // is.
+  it('records the models.dev provider key', () => {
+    const table = parseModelsDev({
+      'anthropic': { models: { 'claude-opus-5': { cost: { input: 5, output: 25 } } } },
+      'some-reseller': { models: { 'claude-opus-5': { cost: { input: 20, output: 100 } } } },
+    })
+    expect(table.get('anthropic/claude-opus-5')!.providerId).toBe('anthropic')
+    expect(table.get('some-reseller/claude-opus-5')!.providerId).toBe('some-reseller')
+    // The bare name went to the first-party listing, and says so.
+    expect(table.get('claude-opus-5')!.providerId).toBe('anthropic')
+  })
+
+  it('records the openrouter vendor prefix', () => {
+    const table = parseOpenRouterModels({
+      data: [{ id: 'anthropic/claude-opus-5', pricing: { prompt: '0.000005', completion: '0.000025' } }],
+    })
+    expect(table.get('anthropic/claude-opus-5')!.providerId).toBe('anthropic')
+    expect(table.get('claude-opus-5')!.providerId).toBe('anthropic')
+  })
+})
