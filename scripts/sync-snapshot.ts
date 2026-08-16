@@ -5,27 +5,23 @@
 // facts left are the ones no upstream publishes at all (peak/off-peak
 // schedules and fast-tier multipliers).
 //
-// This builds an ARCHIVE, not a table. models.dev — like OpenRouter,
-// LiteLLM and ccusage — publishes one number per model: whatever it costs
-// today. Applied naively that re-prices history, so a vendor raising a rate
-// silently inflates last month's bill. Each sync therefore *appends* a
-// period dated today rather than overwriting, and the resulting schedule
-// keeps old months on old rates.
+// This script is only the IO. The merge — and the reasoning for why it
+// appends rather than overwrites — lives in `mergeSnapshot`, where it can be
+// tested without a network call.
 //
-// Two consequences worth knowing:
-//
-//   - An effective date is only as precise as the sync cadence. A price
-//     that changed three weeks before a sync is dated at the sync. Sync
-//     often if that matters.
-//   - The merge is APPEND-ONLY in both directions: a model that disappears
-//     upstream keeps its whole history. Stored model strings are immortal,
-//     and a row that silently prices at $0 is worse than a stale rate.
+// The one consequence to keep in mind while running it: an effective date is
+// only as precise as the sync cadence. A price that changed three weeks
+// before a sync is dated at the sync. Sync often if that matters.
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { mergeSnapshot, SYNC_PROVIDERS } from '../src/catalog/sync'
+// The archive is filtered to exactly the providers the live index ranks as
+// first-party. If the two lists disagree, a vendor-vs-reseller price gap
+// reads as a change over time and gets grafted into the history as one.
+import { DEFAULT_PROVIDER_PRIORITY } from '../src/catalog/modelsdev'
+import { mergeSnapshot } from '../src/catalog/sync'
 
 const SOURCE = 'https://models.dev/api.json'
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'catalog', 'snapshot.json')
@@ -40,10 +36,7 @@ if (!response.ok) {
 const api = await response.json()
 const previous = JSON.parse(readFileSync(OUT, 'utf8'))
 
-// The merge itself lives in src/catalog/sync.ts so it can be tested without
-// a network call — it carries the append-only guarantee, and this script is
-// only the IO around it.
-const { models, added, repriced, retained } = mergeSnapshot(previous.models, api, SYNC_PROVIDERS, today)
+const { models, added, repriced, retained } = mergeSnapshot(previous.models, api, DEFAULT_PROVIDER_PRIORITY, today)
 
 const keys = Object.keys(models).sort()
 

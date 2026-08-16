@@ -30,7 +30,7 @@ export const DEFAULT_PROVIDER_PRIORITY: readonly string[] = [
   'azure',
 ]
 
-interface ModelsDevCost {
+export interface ModelsDevCost {
   input?: number
   output?: number
   cache_read?: number
@@ -55,7 +55,14 @@ export interface ParseModelsDevOptions {
   providerPriority?: readonly string[]
 }
 
-function isUsableCost(cost: ModelsDevCost | undefined): cost is ModelsDevCost {
+/**
+ * Whether a models.dev cost block may be priced against at all.
+ *
+ * The single definition of what is allowed into either the live index or the
+ * archive — both read the same payload, and a rule enforced in only one of
+ * them lets a row upstream rejects live still be written to disk forever.
+ */
+export function isUsableCost(cost: ModelsDevCost | undefined): cost is ModelsDevCost {
   if (!cost) {
     return false
   }
@@ -75,6 +82,26 @@ function isUsableCost(cost: ModelsDevCost | undefined): cost is ModelsDevCost {
   // availability. Pricing a real workload against those silently reports
   // $0 spend, which is worse than reporting nothing.
   return input > 0 || output > 0
+}
+
+/**
+ * The cache rates a cost block implies, in whatever unit `divisor` selects
+ * (1e6 for per-token, 1 to stay per-MTok as the archive does).
+ *
+ * Absent `cache_write` falls back to `cache_read`, absent `cache_read` to 10%
+ * of input — the same convention the OpenRouter adapter applies. Shared so
+ * the live index and the archive cannot default differently and turn one
+ * quote into two.
+ */
+export function cacheRatesFrom(cost: ModelsDevCost, divisor: number): { cacheRead: number, cacheWrite: number } {
+  const input = cost.input! / divisor
+  const cacheRead = typeof cost.cache_read === 'number' && Number.isFinite(cost.cache_read)
+    ? cost.cache_read / divisor
+    : input * 0.1
+  const cacheWrite = typeof cost.cache_write === 'number' && Number.isFinite(cost.cache_write)
+    ? cost.cache_write / divisor
+    : cacheRead
+  return { cacheRead, cacheWrite }
 }
 
 /**
@@ -114,14 +141,7 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
       }
       const input = cost.input! / 1e6
       const output = cost.output! / 1e6
-      // Same defaulting rule as the OpenRouter adapter: absent cache_write
-      // falls back to cache_read, absent cache_read to 10% of input.
-      const cacheRead = typeof cost.cache_read === 'number' && Number.isFinite(cost.cache_read)
-        ? cost.cache_read / 1e6
-        : input * 0.1
-      const cacheWrite = typeof cost.cache_write === 'number' && Number.isFinite(cost.cache_write)
-        ? cost.cache_write / 1e6
-        : cacheRead
+      const { cacheRead, cacheWrite } = cacheRatesFrom(cost, 1e6)
       const schedule: PriceSchedule = {
         displayName: typeof model.name === 'string' ? model.name : undefined,
         source: 'modelsdev',

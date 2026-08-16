@@ -18,6 +18,18 @@ export function normalizeSchedule(
   onWarn?: (message: string, error: unknown) => void,
   id?: string,
 ): PriceSchedule | null {
+  // One period and no peak describes essentially every model in the
+  // catalogue — nothing to sort and no window to check, so return the
+  // schedule itself. Worth the branch: this runs over the whole bundled
+  // table on construction and over every parsed remote entry on each load,
+  // and rebuilding all of them would allocate a second copy of a table that
+  // is otherwise shared by identity.
+  const only = schedule.periods.length === 1 ? schedule.periods[0] : undefined
+  if (only && !only.peak && !Number.isNaN(only.from)) {
+    warnIfUnanchored(schedule, onWarn, id)
+    return schedule
+  }
+
   const usable = schedule.periods.filter(period => !Number.isNaN(period.from))
   if (usable.length === 0) {
     onWarn?.(`schedule "${id ?? schedule.displayName ?? '?'}" has no usable periods and was dropped`, undefined)
@@ -27,37 +39,43 @@ export function normalizeSchedule(
   // `periodAt` walks the list and stops at the first period starting later
   // than the instant asked for, so an out-of-order list returns the wrong
   // era's rate — silently, and only for the models that have history.
-  const ordered = [...usable].sort((a, b) => a.from - b.from)
-  let changed = ordered.length !== schedule.periods.length
-    || ordered.some((period, i) => period !== schedule.periods[i])
+  // Sorted in place: `filter` above already made this array ours.
+  usable.sort((a, b) => a.from - b.from)
 
-  const periods: PricePeriod[] = ordered.map((period) => {
+  const periods: PricePeriod[] = usable.map((period) => {
     if (!period.peak) {
       return period
     }
     const windowsUtc = normalizeWindows(period.peak.windowsUtc)
-    if (windowsUtc.length === period.peak.windowsUtc.length
-      && windowsUtc.every((w, i) => w[0] === period.peak!.windowsUtc[i]![0] && w[1] === period.peak!.windowsUtc[i]![1])) {
-      return period
-    }
-    changed = true
     // Every window was nonsense: the period simply has no peak.
     return windowsUtc.length === 0
       ? { from: period.from, rates: period.rates }
       : { ...period, peak: { ...period.peak, windowsUtc } }
   })
 
-  const result = changed ? { ...schedule, periods } : schedule
-  // A time-sensitive schedule with no `sqlMatch` still prices correctly when
-  // the caller passes `at`, but the query layer is never told to split these
-  // rows by hour, so in practice they all blend. Worth saying out loud.
-  if (isTimeSensitive(result) && !(result.sqlMatch && result.sqlMatch.length > 0)) {
-    onWarn?.(
-      `schedule "${id ?? result.displayName ?? '?'}" varies with time but declares no sqlMatch, so its rows cannot be anchored to an hour`,
-      undefined,
-    )
-  }
+  const result = { ...schedule, periods }
+  warnIfUnanchored(result, onWarn, id)
   return result
+}
+
+/**
+ * A time-sensitive schedule with no `sqlMatch` still prices correctly when
+ * the caller passes `at`, but the query layer is never told to split its rows
+ * by hour, so in practice they all blend. The type says the field is
+ * required; this is what says so at runtime.
+ */
+function warnIfUnanchored(
+  schedule: PriceSchedule,
+  onWarn: ((message: string, error: unknown) => void) | undefined,
+  id: string | undefined,
+): void {
+  if (!onWarn || !isTimeSensitive(schedule) || schedule.sqlMatch?.length) {
+    return
+  }
+  onWarn(
+    `schedule "${id ?? schedule.displayName ?? '?'}" varies with time but declares no sqlMatch, so its rows cannot be anchored to an hour`,
+    undefined,
+  )
 }
 
 /**
@@ -74,7 +92,9 @@ function normalizeWindows(windows: Array<[number, number]>): Array<[number, numb
       Math.max(0, Math.min(24, Math.floor(start))),
       Math.max(0, Math.min(24, Math.ceil(end))),
     ])
-    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+    // `end > start` also drops NaN, the only non-finite value that survives
+    // the clamp above.
+    .filter(([start, end]) => end > start)
     .sort((a, b) => a[0] - b[0])
 
   const merged: Array<[number, number]> = []

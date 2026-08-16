@@ -61,17 +61,20 @@ export function flatSchedule(
 }
 
 /**
- * Whether two rate cards quote the same price, within the rounding noise of
- * a unit conversion (per-MTok archives vs per-token catalogue strings).
+ * Whether two prices are the same price, within the rounding noise of a unit
+ * conversion (per-MTok archives vs per-token catalogue strings) and of the
+ * `input * 0.1` cache-rate default, which drifts in its last bits.
+ *
+ * Relative, not absolute: rates span from 1e-8 to 1e-4 per token, so any
+ * fixed tolerance is either meaningless at the top or blind at the bottom.
  */
+export function closeEnough(a: number, b: number): boolean {
+  return Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b)) * 1e-9
+}
+
+/** Whether two rate cards quote the same price. See `closeEnough`. */
 export function ratesEqual(a: Rates, b: Rates): boolean {
-  for (const key of RATE_KEYS) {
-    const scale = Math.max(Math.abs(a[key]), Math.abs(b[key]))
-    if (Math.abs(a[key] - b[key]) > scale * 1e-9) {
-      return false
-    }
-  }
-  return true
+  return RATE_KEYS.every(key => closeEnough(a[key], b[key]))
 }
 
 /**

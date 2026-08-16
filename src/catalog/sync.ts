@@ -1,4 +1,6 @@
 import type { ModelsDevResponse } from './modelsdev'
+import { closeEnough } from '../rates'
+import { cacheRatesFrom, isUsableCost } from './modelsdev'
 
 /**
  * The merge behind `pnpm sync`, separated from the script so it can be
@@ -16,16 +18,10 @@ import type { ModelsDevResponse } from './modelsdev'
  */
 
 /**
- * Providers whose listings are archived, best first.
- *
- * Deliberately the same list the live index ranks as first-party: if the
- * two disagree, a vendor-vs-reseller price gap reads as a change over time
- * and gets grafted into the history as one.
+ * The on-disk archive format, shared with the reader in `fallback.ts` so the
+ * two cannot disagree about the tuple's arity or order. `$/MTok`.
  */
-export { DEFAULT_PROVIDER_PRIORITY as SYNC_PROVIDERS } from './modelsdev'
-
-/** `[effectiveFrom|null, input, cacheWrite, cacheRead, output]`, $/MTok. */
-export type SnapshotPeriod = [string | null, number, number, number, number]
+export type SnapshotPeriod = [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number]
 export type SnapshotEntry = [displayName: string, periods: SnapshotPeriod[]]
 export type SnapshotModels = Record<string, SnapshotEntry>
 
@@ -38,29 +34,14 @@ export interface SyncResult {
 }
 
 /**
- * Rates count as unchanged within a relative epsilon.
- *
- * The archive is append-only, so a spurious reprice is permanent. Rates are
- * carried through JSON and `input * 0.1` arithmetic, which is exactly where
- * a value drifts in its last bits — the snapshot already contains figures
- * like `0.010000000000000002`. An exact comparison turns that drift into a
- * price-change record that never happened. Matches `ratesEqual`.
+ * Rates count as unchanged within `closeEnough`'s relative epsilon, rather
+ * than exactly. The archive is append-only, so a spurious reprice is
+ * permanent, and the snapshot already holds figures like
+ * `0.010000000000000002` — an exact comparison would turn that last-bit
+ * drift into a price-change record that never happened.
  */
-function sameRates(a: ReadonlyArray<string | number | null>, b: readonly number[]): boolean {
-  if (a.length !== b.length) {
-    return false
-  }
-  return a.every((value, i) => {
-    const other = b[i]!
-    if (typeof value !== 'number') {
-      return false
-    }
-    if (value === other) {
-      return true
-    }
-    const scale = Math.max(Math.abs(value), Math.abs(other))
-    return Math.abs(value - other) <= 1e-9 * scale
-  })
+function sameRates(a: readonly number[], b: readonly number[]): boolean {
+  return a.every((value, i) => closeEnough(value, b[i]!))
 }
 
 export function mergeSnapshot(
@@ -77,13 +58,7 @@ export function mergeSnapshot(
   for (const provider of providers) {
     for (const [id, model] of Object.entries(api[provider]?.models ?? {})) {
       const cost = model?.cost
-      if (!cost || typeof cost.input !== 'number' || typeof cost.output !== 'number') {
-        continue
-      }
-      // Placeholder rows advertise availability at 0/0; pricing a real
-      // workload against those silently reports $0 spend. A negative rate
-      // is never a real quote and would credit back other models' cost.
-      if (!(cost.input > 0 || cost.output > 0) || cost.input < 0 || cost.output < 0) {
+      if (!isUsableCost(cost)) {
         continue
       }
       const key = id.toLowerCase()
@@ -92,13 +67,9 @@ export function mergeSnapshot(
         continue
       }
       seen.add(key)
-      const cacheRead = typeof cost.cache_read === 'number' && Number.isFinite(cost.cache_read)
-        ? cost.cache_read
-        : cost.input * 0.1
-      const cacheWrite = typeof cost.cache_write === 'number' && Number.isFinite(cost.cache_write)
-        ? cost.cache_write
-        : cacheRead
-      const rates: [number, number, number, number] = [cost.input, cacheWrite, cacheRead, cost.output]
+      // Stored as models.dev publishes them, per MTok — hence divisor 1.
+      const { cacheRead, cacheWrite } = cacheRatesFrom(cost, 1)
+      const rates: [number, number, number, number] = [cost.input!, cacheWrite, cacheRead, cost.output!]
       const displayName = typeof model.name === 'string' ? model.name : id
 
       const before = models[key]
@@ -112,7 +83,7 @@ export function mergeSnapshot(
       }
       const periods = before[1]
       const latest = periods.at(-1)!
-      if (sameRates(latest.slice(1), rates)) {
+      if (sameRates(latest.slice(1) as number[], rates)) {
         // Unchanged. Refresh the display name only.
         models[key] = [displayName, periods]
         continue

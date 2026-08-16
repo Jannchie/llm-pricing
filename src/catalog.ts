@@ -110,6 +110,15 @@ export type EstimateArgs = TokenCounts & {
   window?: readonly [TimeInput, TimeInput]
 }
 
+/**
+ * Cap on the resolved-lookup memo. It is keyed by the raw stored model
+ * string, so anywhere a name reaches it from user input an unbounded Map is
+ * a leak that outlives every request. Cleared wholesale rather than evicted
+ * one at a time: the working set of a real deployment is a few hundred
+ * names, so hitting this at all means the keys are not model names.
+ */
+const RESOLVED_LIMIT = 50_000
+
 /** Normalise a whole table, dropping the schedules that cannot price. */
 function normalizeTable(
   table: Record<string, PriceSchedule>,
@@ -152,15 +161,6 @@ export class PricingCatalog {
    * wherever `remote` is reassigned.
    */
   private readonly resolved = new Map<string, PriceSchedule | null>()
-
-  /**
-   * Cap on the memo above. It is keyed by the raw stored string, so
-   * anywhere a model name reaches it from user input an unbounded Map is a
-   * leak that outlives every request. Cleared wholesale rather than evicted
-   * one at a time: the working set of a real deployment is a few hundred
-   * names, so hitting this at all means the keys are not model names.
-   */
-  private static readonly RESOLVED_LIMIT = 50_000
 
   /** Entries currently memoised. Exposed for tests and diagnostics. */
   get resolvedSize(): number {
@@ -452,8 +452,15 @@ export class PricingCatalog {
     if (cached !== undefined) {
       return cached
     }
-    const schedule = this.resolveSchedule(model)
-    if (this.resolved.size >= PricingCatalog.RESOLVED_LIMIT) {
+    // The single gate every schedule leaves through, rather than one at each
+    // table that feeds it. Two of the producers below *create* the shapes the
+    // invariants exist for: `mergeLiveQuote` turns a flat archive plus a live
+    // quote into a two-period schedule, and `scaleSchedule` copies whatever
+    // its base was. Normalising here covers both, and covers whatever
+    // produces a schedule next, by construction.
+    const resolved = this.resolveSchedule(model)
+    const schedule = resolved ? normalizeSchedule(resolved, this.onWarn, model) : null
+    if (this.resolved.size >= RESOLVED_LIMIT) {
       this.resolved.clear()
     }
     this.resolved.set(model, schedule)

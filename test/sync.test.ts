@@ -1,7 +1,7 @@
 import type { SnapshotModels, SnapshotPeriod } from '../src/catalog/sync'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PROVIDER_PRIORITY } from '../src/catalog/modelsdev'
-import { mergeSnapshot, SYNC_PROVIDERS } from '../src/catalog/sync'
+import { mergeSnapshot } from '../src/catalog/sync'
 
 // The archive generator carries this package's strongest claim — history is
 // never re-priced — and had no tests at all.
@@ -100,12 +100,19 @@ describe('what must never enter the archive', () => {
   })
 })
 
-describe('the two provider lists cannot drift apart', () => {
-  it('archives exactly the providers the live index treats as first-party', () => {
-    // The archive and the live catalogue must quote on the same basis. If
-    // they disagree about who is first-party, every gap between a vendor
-    // price and a reseller price reads as a reprice and is grafted into
-    // the history as one.
-    expect([...SYNC_PROVIDERS]).toEqual([...DEFAULT_PROVIDER_PRIORITY])
+describe('the list the script actually archives with', () => {
+  it('gives the bare name to the highest-priority provider listing it', () => {
+    // The archive and the live index must quote on the same basis, so the
+    // script feeds `mergeSnapshot` the very list `parseModelsDev` ranks by.
+    // With no second copy left to drift, what is worth asserting is that the
+    // ordering does its job across the whole list: every provider quotes the
+    // same id, worst-first in the payload, and the winner must still be the
+    // one at the head of the priority list.
+    const listings: Record<string, { models: Record<string, { name: string, cost: { input: number, output: number } }> }> = {}
+    for (const [i, provider] of DEFAULT_PROVIDER_PRIORITY.toReversed().entries()) {
+      listings[provider] = { models: { shared: { name: provider, cost: { input: i + 1, output: 1 } } } }
+    }
+    const { models } = mergeSnapshot({}, listings, DEFAULT_PROVIDER_PRIORITY, '2026-08-16')
+    expect(models.shared![0]).toBe(DEFAULT_PROVIDER_PRIORITY[0])
   })
 })

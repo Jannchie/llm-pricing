@@ -1,4 +1,5 @@
 import type { PricePeriod, PriceSchedule } from '../types'
+import type { SnapshotEntry, SnapshotPeriod } from './sync'
 
 import snapshot from './snapshot.json'
 
@@ -13,9 +14,6 @@ import snapshot from './snapshot.json'
 //
 // What IS hand-maintained here is the one thing no upstream publishes: the
 // fast/priority tier multipliers below.
-
-type SnapshotPeriod = [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number]
-type SnapshotEntry = [displayName: string, periods: SnapshotPeriod[]]
 
 // The JSON's inferred type cannot express fixed-arity tuples; the shape is
 // guaranteed by the generator instead.
