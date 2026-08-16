@@ -1,5 +1,5 @@
 import type { PricingSource } from '../src/sources'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -151,7 +151,13 @@ describe('filecache', () => {
   })
 
   it('survives a directory it cannot write', async () => {
-    const cache = fileCache('/proc/definitely-not-writable')
+    // Point the cache at a path that is a *file*, so mkdir fails with
+    // ENOTDIR. A permission-denied path would do too, but the obvious
+    // candidates are not portable: /proc exists only on Linux, and on the
+    // CI runner mkdir under it hangs rather than erroring.
+    const file = path.join(await tempDir(), 'not-a-directory')
+    await writeFile(file, '')
+    const cache = fileCache(file)
     await expect(cache.set('k', 'v')).resolves.toBeUndefined()
     expect(await cache.get('k')).toBeNull()
   })
