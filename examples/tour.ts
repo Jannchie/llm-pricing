@@ -141,7 +141,7 @@ const rows = [
 const window = [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 30)] as const
 let total = 0
 for (const row of rows) {
-  const { cost, basis } = estimateCostFromRow(row, window)
+  const { cost, basis } = estimateCostFromRow(row, { window })
   total += cost
   console.log(`  ${String(row.model).padEnd(20)} ${usd(cost)}  (${basis})`)
 }
@@ -151,6 +151,18 @@ console.log(`  total ${usd(total)}`)
 // That only works because the query grouped by the UTC hour — ask the
 // catalogue which models are worth splitting:
 console.log('  split these in SQL:', offline.timeSensitiveSqlPatterns())
+
+// Whether reasoning is already inside `output_tokens` or sits beside it is
+// a property of whoever wrote the row — but not a constant one, so pass
+// `inferShape` and let each row's own total settle it. These two are the
+// same numbers under the two conventions, and cost differently:
+for (const row of [
+  { model: 'gemini-3-flash-preview', input_tokens: 1e6, output_tokens: 100_000, reasoning_output_tokens: 400_000, total_tokens: 1_500_000 },
+  { model: 'gemini-3-flash-preview', input_tokens: 1e6, output_tokens: 100_000, reasoning_output_tokens: 400_000, total_tokens: 1_100_000 },
+]) {
+  const inferred = estimateCostFromRow(row, { inferShape: true })
+  console.log(`  total ${row.total_tokens}  ->  ${usd(inferred.cost)}  (${usd(estimateCostFromRow(row).cost)} without inference)`)
+}
 
 // ---------------------------------------------------------------------
 section('9. Your own prices')

@@ -577,7 +577,7 @@ describe('the row api must be able to say what shape the rows are', () => {
       reasoning_output_tokens: 400,
     }
     const folded = catalog.estimateFromRow(row).cost
-    const beside = catalog.estimateFromRow(row, undefined, undefined, { reasoningIncludedInOutput: false }).cost
+    const beside = catalog.estimateFromRow(row, { shape: { reasoningIncludedInOutput: false } }).cost
     expect(beside / folded).toBeCloseTo(1.4, 9)
   })
 })

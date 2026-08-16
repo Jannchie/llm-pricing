@@ -2,7 +2,7 @@ import type { PricingSource } from '../src/sources'
 import { describe, expect, it, vi } from 'vitest'
 import { PricingCatalog } from '../src/catalog'
 import { flatSchedule } from '../src/rates'
-import { DEFAULT_ROW_COLUMNS, estimateCostFromRow, PRICE_ANCHOR_COLUMN } from '../src/row'
+import { DEFAULT_ROW_COLUMNS, estimateCostFromRow, inferTokenShape, PRICE_ANCHOR_COLUMN } from '../src/row'
 
 function stubSource(name: string, table: Record<string, number>): PricingSource {
   return {
@@ -41,6 +41,40 @@ describe('pricingcatalog offline', () => {
 
   it('has no fast variant for models that do not offer one', () => {
     expect(catalog.getPrice('claude-sonnet-5-fast')).toBeNull()
+  })
+
+  // Both adapters reject unbillable quotes at parse time, but `overrides`
+  // and `fallback` are caller-supplied and reach the catalogue directly.
+  // A negative rate does not merely mis-price its own model — summed into
+  // a total it credits back every other model's cost — and a NaN turns
+  // every aggregate it reaches into NaN.
+  it('drops a caller-supplied schedule quoting an unbillable rate', () => {
+    const onWarn = vi.fn()
+    const guarded = new PricingCatalog({
+      sources: [],
+      onWarn,
+      overrides: {
+        'negative-model': flatSchedule('Negative', -1, -0.1, -1),
+        'nan-model': flatSchedule('NaN', Number.NaN, 0, 0),
+        'free-model': flatSchedule('Free', 0, 0, 0),
+      },
+    })
+    expect(guarded.getPrice('negative-model')).toBeNull()
+    expect(guarded.getPrice('nan-model')).toBeNull()
+    // Zero is a real quote, not an unbillable one.
+    expect(guarded.getPrice('free-model')?.inputCostPerToken).toBe(0)
+    expect(onWarn).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let a dropped override shadow the fallback table', () => {
+    const shadowed = new PricingCatalog({
+      sources: [],
+      onWarn: () => {},
+      overrides: { 'claude-opus-5': flatSchedule('Poisoned', -1, -1, -1) },
+    })
+    // Falling through is the whole reason for dropping rather than
+    // clamping: a resolved id outranks every later source.
+    expect(shadowed.getPrice('claude-opus-5')?.inputCostPerToken).toBe(5e-6)
   })
 
   it('returns null and zero cost for an unknown model', () => {
@@ -217,6 +251,16 @@ describe('pricingcatalog loading', () => {
   })
 })
 
+function reasoningRow(output: number, reasoning: number, total: number) {
+  return {
+    model: 'claude-opus-5',
+    input_tokens: 1000,
+    output_tokens: output,
+    reasoning_output_tokens: reasoning,
+    total_tokens: total,
+  }
+}
+
 describe('estimatecostfromrow', () => {
   const catalog = new PricingCatalog({ sources: [] })
 
@@ -239,7 +283,7 @@ describe('estimatecostfromrow', () => {
       cached_input_tokens: 0,
       output_tokens: 0,
       [PRICE_ANCHOR_COLUMN]: null,
-    }, [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 2)])
+    }, { window: [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 2)] })
     expect(result.basis).toBe('blended')
     expect(result.cost).toBeCloseTo((7 * 0.44 + 17 * 0.22) / 24, 10)
   })
@@ -258,6 +302,47 @@ describe('estimatecostfromrow', () => {
     expect(estimateCostFromRow(catalog, {}).cost).toBe(0)
   })
 
+  describe('infertokenshape', () => {
+    it('reads reasoning as a sibling when the total says so', () => {
+      // total = 1000 + 200 + 50: thinking sits beside the output count, the
+      // way Gemini reports it, and Google bills it at the output rate.
+      expect(inferTokenShape(reasoningRow(200, 50, 1250))).toEqual({ reasoningIncludedInOutput: false })
+    })
+
+    it('reads reasoning as folded in when the total says so', () => {
+      // total = 1000 + 200: thinking is already inside output_tokens.
+      expect(inferTokenShape(reasoningRow(200, 50, 1200))).toEqual({ reasoningIncludedInOutput: true })
+    })
+
+    it('declines to guess when the total matches neither convention', () => {
+      // A collector bug — say a per-session cumulative leaking into a
+      // per-turn total. Which component is wrong is unknowable from here.
+      expect(inferTokenShape(reasoningRow(200, 50, 99_999))).toEqual({})
+    })
+
+    it('declines to guess without a total, or without reasoning to attribute', () => {
+      expect(inferTokenShape({ ...reasoningRow(200, 50, 0), total_tokens: undefined })).toEqual({})
+      // Both conventions cost the same when reasoning is zero.
+      expect(inferTokenShape(reasoningRow(200, 0, 1200))).toEqual({})
+    })
+
+    it('changes the bill only in the sibling case', () => {
+      // 1M input + 1M output + 1M reasoning against Opus 5 ($5/$25 per M).
+      const beside = { model: 'claude-opus-5', input_tokens: 1e6, output_tokens: 1e6, reasoning_output_tokens: 1e6, total_tokens: 3e6 }
+      const folded = { ...beside, total_tokens: 2e6 }
+      expect(estimateCostFromRow(catalog, beside, { inferShape: true }).cost).toBeCloseTo(55, 10)
+      expect(estimateCostFromRow(catalog, folded, { inferShape: true }).cost).toBeCloseTo(30, 10)
+    })
+
+    it('lets an explicit per-source shape be overridden per row', () => {
+      // The documented composition: a source-wide default, corrected by
+      // whatever the row's own total proves.
+      const r = reasoningRow(200, 50, 1250)
+      const shape = { inputIncludesCache: false, ...inferTokenShape(r) }
+      expect(shape).toEqual({ inputIncludesCache: false, reasoningIncludedInOutput: false })
+    })
+  })
+
   it('is reachable as a method, so a caller with its own catalogue can use it', () => {
     // The bound free function only ever sees the default catalogue. Anyone
     // who needs a cache, their own sources or tenant isolation holds an
@@ -273,8 +358,7 @@ describe('estimatecostfromrow', () => {
   it('reads the column names the caller supplies', () => {
     const result = catalog.estimateFromRow(
       { modelName: 'claude-opus-5', prompt_tokens: 1e6, completion_tokens: 0 },
-      undefined,
-      { ...DEFAULT_ROW_COLUMNS, model: 'modelName', inputTokens: 'prompt_tokens', outputTokens: 'completion_tokens' },
+      { columns: { ...DEFAULT_ROW_COLUMNS, model: 'modelName', inputTokens: 'prompt_tokens', outputTokens: 'completion_tokens' } },
     )
     expect(result.cost).toBeCloseTo(5, 10)
   })

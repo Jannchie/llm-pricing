@@ -1,6 +1,6 @@
 import type { PricingCache } from './cache'
 import type { TokenCounts } from './estimate'
-import type { RowColumns, TokenShape } from './row'
+import type { RowOptions } from './row'
 import type { PricingSource } from './sources'
 import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
@@ -565,16 +565,13 @@ export class PricingCatalog {
    * thing `estimateCostFromRow` does, against this catalogue rather than
    * the default one.
    *
-   * Pass `columns` when your table spells them differently, and `shape`
-   * when the rows come from a producer that nests its counts differently
-   * — that travels with whoever wrote the row, not with the model.
+   * Pass `columns` when your table spells them differently, `shape` when
+   * the rows come from a producer that nests its counts differently — that
+   * travels with whoever wrote the row, not with the model — and
+   * `inferShape` to let each row's own total correct the half of `shape`
+   * that is recoverable.
    */
-  estimateFromRow(
-    row: Record<string, unknown>,
-    window?: readonly [TimeInput, TimeInput],
-    columns?: RowColumns,
-    shape?: TokenShape,
-  ): CostEstimate {
-    return estimateRow(this, row, window, columns, shape)
+  estimateFromRow(row: Record<string, unknown>, options?: RowOptions): CostEstimate {
+    return estimateRow(this, row, options)
   }
 }

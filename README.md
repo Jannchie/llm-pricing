@@ -139,9 +139,11 @@ Then price rows straight off the driver output:
 import { estimateCostFromRow } from 'llm-pricing'
 
 for (const row of rows) {
-  const { cost, basis } = estimateCostFromRow(row, [since, until])
+  const { cost, basis } = estimateCostFromRow(row, { window: [since, until] })
 }
 ```
+
+Add `inferShape: true` when the rows carry `total_tokens`. It settles `reasoningIncludedInOutput` from each row's own total rather than from an assumption about its producer — which matters because that half of the shape is not constant per producer: on the store this was measured against, two sources report both conventions within a single day and a single model id.
 
 ## API
 
@@ -156,7 +158,7 @@ Every top-level function is a one-line forward to a `PricingCatalog` method, so 
 | `pricingState()` | `.state()` | `{ status, loadedAt, source, size }` |
 | `getPriceFor(model, at?)` | `.getPrice(...)` | Resolve a model to a flat rate card |
 | `estimateCostUsd(args)` | `.estimate(...)` | Token counts → `{ cost, pricing, basis }` |
-| `estimateCostFromRow(row, window?, columns?, shape?)` | `.estimateFromRow(...)` | Same, from a snake_case SQL row |
+| `estimateCostFromRow(row, options?)` | `.estimateFromRow(...)` | Same, from a snake_case SQL row |
 | `timeSensitiveSqlPatterns()` | `.timeSensitiveSqlPatterns()` | LIKE patterns worth splitting by hour |
 
 Standalone, no catalogue involved:
@@ -167,6 +169,7 @@ Standalone, no catalogue involved:
 | `pricingCandidates(model)` | The name normalization, exposed for reuse |
 | `modelsDevSource()` / `openRouterSource()` | Source adapters |
 | `PRICE_ANCHOR_COLUMN` / `DEFAULT_ROW_COLUMNS` | The SQL-side contract |
+| `inferTokenShape(row, columns?)` | Recover `reasoningIncludedInOutput` from a row's own total |
 | `fileCache()` (`llm-pricing/node`) / `memoryCache()` | Catalogue caches |
 
 ### `llm-pricing/internal`
@@ -181,13 +184,13 @@ The schedule primitives accept only a `NormalizedSchedule` — what `normalizeSc
 
 - **Long-context tiers are ignored.** models.dev publishes `context_over_200k` rates (often 2× list) and OpenAI charges them. Selecting between tiers needs the context length of each individual request, which aggregated usage rows no longer carry.
 - **Batch, priority and committed-throughput discounts are not modelled.**
-- **Reasoning nesting is producer-dependent.** OpenAI and Anthropic fold reasoning into `output_tokens`, so it is not billed twice. Gemini reports it beside the output count and charges for it — pass `reasoningIncludedInOutput: false` for those rows or the thinking tokens are dropped.
+- **Reasoning nesting is producer-dependent, and not reliably so.** OpenAI and Anthropic fold reasoning into `output_tokens`, so it is not billed twice. Gemini reports it beside the output count and charges for it — pass `reasoningIncludedInOutput: false` for those rows or the thinking tokens are dropped. But a per-source rule is not enough: real stores contain both conventions from one source, one model and one day. Rows carrying `total_tokens` should use `inferShape` instead, which reads the answer off each row.
 
 ## Development
 
 ```bash
 pnpm install
-pnpm test        # 190 tests, no network
+pnpm test        # 201 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build
