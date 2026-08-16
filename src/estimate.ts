@@ -76,10 +76,22 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
   // silently get charged at the full prompt rate instead of the much
   // cheaper cache-read rate.
   const explicitCacheRead = count(tokens.cacheReadInputTokens)
+  const cached = count(tokens.cachedInputTokens)
   const cacheRead = explicitCacheRead > 0
     ? explicitCacheRead
-    : Math.max(0, count(tokens.cachedInputTokens) - cacheCreation)
-  const fresh = Math.max(0, count(tokens.inputTokens) - cacheCreation - cacheRead)
+    : Math.max(0, cached - cacheCreation)
+  // `cachedInputTokens` is the ONLY count documented as part of
+  // `inputTokens`, so it is the only one carved back out of it.
+  //
+  // Anthropic reports `input_tokens` as the fresh tokens alone, with
+  // `cache_creation_input_tokens` and `cache_read_input_tokens` beside it
+  // rather than inside it; so does any client that has already split hit
+  // from miss. Subtracting those there bills real fresh input at $0 —
+  // silently, because the result is a smaller number rather than an error.
+  // Measured against four agent CLIs' own cost figures, that was the whole
+  // of the disagreement: correcting it reproduced two of them exactly and
+  // left the Codex-shaped one untouched.
+  const fresh = Math.max(0, count(tokens.inputTokens) - Math.min(cached, count(tokens.inputTokens)))
   const output = count(tokens.outputTokens)
   return fresh * rates.inputCostPerToken
     + creationDefaultRate * rates.cacheCreationInputCostPerToken
