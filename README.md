@@ -78,14 +78,17 @@ Both tables are append-only. Stored model strings are immortal: deleting a row b
 What it does not do on its own is survive a restart. Give it a cache and the download is shared across reboots — and across a PM2 cluster, whose workers would otherwise each pull the same 4 MB:
 
 ```ts
-import { PricingCatalog } from 'llm-pricing'
+import { configureDefaultCatalog } from 'llm-pricing'
 import { fileCache } from 'llm-pricing/node'
 
-const catalog = new PricingCatalog({
+// Once, during startup, before anything prices anything.
+configureDefaultCatalog({
   cache: fileCache(), // defaults to os.tmpdir()/llm-pricing-cache
   cacheTtlMs: 24 * 60 * 60 * 1000, // defaults to refreshMs
 })
 ```
+
+That configures the catalogue the top-level functions use. Construct a `PricingCatalog` directly instead when you need more than one — different sources, tenant isolation, a test double — and use its methods, which mirror the functions one for one. Calling `configureDefaultCatalog` after the default catalogue is already in use throws rather than quietly ignoring the options.
 
 `PricingCache` is a two-method string store, so Redis, a KV namespace or a plain `Map` (`memoryCache()`) all work:
 
@@ -114,7 +117,7 @@ catalog.estimate({ model: 'deepseek-v4-pro', window: [since, until], ...tokens }
 
 `blended` weights each rate by how much wall-clock time the window spends under it — wrong for someone who only ever works during peak hours, but bounded by `[off-peak, peak]` and honest about the fact that the time axis was aggregated away before pricing.
 
-For SQL callers, group rows by the UTC hour so they price exactly. `PRICE_ANCHOR_COLUMN` names the column and `catalog.timeSensitiveSqlPatterns` gives the LIKE patterns worth splitting — derived from the schedules themselves, so a vendor that gains a peak schedule updates the query automatically:
+For SQL callers, group rows by the UTC hour so they price exactly. `PRICE_ANCHOR_COLUMN` names the column and `timeSensitiveSqlPatterns()` gives the LIKE patterns worth splitting — derived from the schedules themselves, so a vendor that gains a peak schedule updates the query automatically:
 
 ```sql
 case when lower(coalesce(model, '')) like '%deepseek%'
@@ -136,20 +139,35 @@ for (const row of rows) {
 
 ## API
 
+Every top-level function is a one-line forward to a `PricingCatalog` method, so the two columns below are the same API reached two ways. Use the functions when one catalogue per process is enough; hold an instance when it is not.
+
+| Function | Method | Purpose |
+| --- | --- | --- |
+| — | `new PricingCatalog(options)` | One catalogue and its caches |
+| `getDefaultCatalog()` / `configureDefaultCatalog(options)` | — | The shared instance, and its options |
+| `ensurePricingLoaded()` | `.ensureLoaded()` | Load if stale; no-op while fresh |
+| `refreshPricing()` | `.refresh()` | Force a reload past freshness, backoff and cache |
+| `pricingState()` | `.state()` | `{ status, loadedAt, source, size }` |
+| `getPriceFor(model, at?)` | `.getPrice(...)` | Resolve a model to a flat rate card |
+| `estimateCostUsd(args)` | `.estimate(...)` | Token counts → `{ cost, pricing, basis }` |
+| `estimateCostFromRow(row, window?, columns?)` | `.estimateFromRow(...)` | Same, from a snake_case SQL row |
+| `timeSensitiveSqlPatterns()` | `.timeSensitiveSqlPatterns()` | LIKE patterns worth splitting by hour |
+
+Standalone, no catalogue involved:
+
 | Export | Purpose |
 | --- | --- |
-| `PricingCatalog` | Instance holding one catalogue + its caches |
-| `defaultCatalog` | Process-wide instance for servers that want one shared cache |
-| `ensurePricingLoaded()` / `pricingState()` | Load / inspect the default catalogue |
-| `getPriceFor(model, at?)` | Resolve a model to a flat rate card |
-| `estimateCostUsd(args)` | Token counts → `{ cost, pricing, basis }` |
-| `estimateCostFromRow(row, window?)` | Same, from a snake_case SQL row |
-| `costFromRates(rates, tokens)` | Pure arithmetic, no catalogue involved |
-| `pricingCandidates(model)` | The normalization, exposed for reuse |
+| `costFromRates(rates, tokens)` | Pure arithmetic |
+| `pricingCandidates(model)` | The name normalization, exposed for reuse |
 | `modelsDevSource()` / `openRouterSource()` | Source adapters |
-| `PRICE_ANCHOR_COLUMN` / `timeSensitiveSqlPatterns()` | The SQL-side contract |
-| `catalog.refresh()` | Force a reload past freshness, backoff and cache |
+| `PRICE_ANCHOR_COLUMN` / `DEFAULT_ROW_COLUMNS` | The SQL-side contract |
 | `fileCache()` (`llm-pricing/node`) / `memoryCache()` | Catalogue caches |
+
+### `llm-pricing/internal`
+
+The pieces the package is built from — catalogue parsers (`parseModelsDev`), the raw tables (`FALLBACK`, `OVERRIDES`), rate arithmetic (`scaleRates`, `mergeLiveQuote`) and the schedule primitives (`ratesFor`, `peakMsBetween`, `blendRates`) — are exported from a separate subpath.
+
+They are there so the package can be extended, not so it can be used. **Their signatures track whatever the internals need and can change in a minor release.** Everything on the main entry is covered by semver.
 
 ## Known limits
 

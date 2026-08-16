@@ -2,7 +2,7 @@ import type { PricingSource } from '../src/sources'
 import { describe, expect, it, vi } from 'vitest'
 import { PricingCatalog } from '../src/catalog'
 import { flatSchedule } from '../src/rates'
-import { estimateCostFromRow, PRICE_ANCHOR_COLUMN } from '../src/row'
+import { DEFAULT_ROW_COLUMNS, estimateCostFromRow, PRICE_ANCHOR_COLUMN } from '../src/row'
 
 function stubSource(name: string, table: Record<string, number>): PricingSource {
   return {
@@ -81,7 +81,7 @@ describe('pricingcatalog overrides', () => {
   })
 
   it('exposes the sql patterns for every time-sensitive schedule', () => {
-    expect(catalog.timeSensitiveSqlPatterns).toEqual(['%deepseek%'])
+    expect(catalog.timeSensitiveSqlPatterns()).toEqual(['%deepseek%'])
   })
 
   it('accepts caller-supplied overrides', () => {
@@ -256,5 +256,26 @@ describe('estimatecostfromrow', () => {
 
   it('treats a missing model as unpriced rather than throwing', () => {
     expect(estimateCostFromRow(catalog, {}).cost).toBe(0)
+  })
+
+  it('is reachable as a method, so a caller with its own catalogue can use it', () => {
+    // The bound free function only ever sees the default catalogue. Anyone
+    // who needs a cache, their own sources or tenant isolation holds an
+    // instance, and has to be able to price rows against it.
+    const result = catalog.estimateFromRow({
+      model: 'claude-opus-5',
+      input_tokens: 1e6,
+      output_tokens: 0,
+    })
+    expect(result.cost).toBeCloseTo(5, 10)
+  })
+
+  it('reads the column names the caller supplies', () => {
+    const result = catalog.estimateFromRow(
+      { modelName: 'claude-opus-5', prompt_tokens: 1e6, completion_tokens: 0 },
+      undefined,
+      { ...DEFAULT_ROW_COLUMNS, model: 'modelName', inputTokens: 'prompt_tokens', outputTokens: 'completion_tokens' },
+    )
+    expect(result.cost).toBeCloseTo(5, 10)
   })
 })

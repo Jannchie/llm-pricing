@@ -112,7 +112,7 @@ describe('a live reprice does not re-price history', () => {
 
   it('tells the query layer to split those rows by hour', async () => {
     const catalog = await loaded()
-    expect(catalog.timeSensitiveSqlPatterns).toContain('%model-a%')
+    expect(catalog.timeSensitiveSqlPatterns()).toContain('%model-a%')
   })
 
   it('leaves a confirmed price flat, and out of the sql patterns', async () => {
@@ -125,6 +125,6 @@ describe('a live reprice does not re-price history', () => {
     await catalog.ensureLoaded()
     expect(catalog.getPrice('model-a', BEFORE)?.inputCostPerToken).toBe(5e-6)
     expect(catalog.estimate({ model: 'model-a', inputTokens: 1, cachedInputTokens: 0, outputTokens: 0 }).basis).toBe('flat')
-    expect(catalog.timeSensitiveSqlPatterns).not.toContain('%model-a%')
+    expect(catalog.timeSensitiveSqlPatterns()).not.toContain('%model-a%')
   })
 })

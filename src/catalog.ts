@@ -1,5 +1,6 @@
 import type { PricingCache } from './cache'
 import type { TokenCounts } from './estimate'
+import type { RowColumns } from './row'
 import type { PricingSource } from './sources'
 import type { CostEstimate, ModelPrice, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
@@ -8,6 +9,7 @@ import { OVERRIDES } from './catalog/overrides'
 import { costFromRates } from './estimate'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
+import { estimateCostFromRow as estimateRow } from './row'
 import { isTimeSensitive, ratesFor } from './schedule'
 import { modelsDevSource } from './sources'
 
@@ -146,7 +148,7 @@ export class PricingCatalog {
    * gains a peak schedule declares `sqlMatch` next to its periods and the
    * query layer follows automatically.
    */
-  get timeSensitiveSqlPatterns(): readonly string[] {
+  timeSensitiveSqlPatterns(): readonly string[] {
     return [...new Set([
       ...[...Object.values(this.overrides), ...Object.values(this.fallback)]
         .filter(schedule => isTimeSensitive(schedule))
@@ -407,5 +409,20 @@ export class PricingCatalog {
     }
     const { rates, basis } = ratesFor(schedule, args.at, args.window)
     return { cost: costFromRates(rates, args), pricing: this.priceCardFor(schedule, rates), basis }
+  }
+
+  /**
+   * Price a raw SQL row using snake_case `*_tokens` column names — the same
+   * thing `estimateCostFromRow` does, against this catalogue rather than
+   * the default one.
+   *
+   * Pass `columns` when your table spells them differently.
+   */
+  estimateFromRow(
+    row: Record<string, unknown>,
+    window?: readonly [TimeInput, TimeInput],
+    columns?: RowColumns,
+  ): CostEstimate {
+    return estimateRow(this, row, window, columns)
   }
 }

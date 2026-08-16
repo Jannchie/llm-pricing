@@ -19,7 +19,7 @@ import type { CostEstimate, TimeInput } from './types'
  * end as price_hour_epoch
  * ```
  *
- * Build the LIKE list from `catalog.timeSensitiveSqlPatterns` rather than
+ * Build the LIKE list from `catalog.timeSensitiveSqlPatterns()` rather than
  * hard-coding it, and prefer `extract(epoch from ...)` over `date_trunc`:
  * the latter depends on the session TimeZone, which is the wrong frame for
  * a billing window.

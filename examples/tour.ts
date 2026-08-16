@@ -7,7 +7,6 @@
 import {
   costFromRates,
   estimateCostFromRow,
-  flatSchedule,
   getPriceFor,
   modelsDevSource,
   openRouterSource,
@@ -16,6 +15,8 @@ import {
   PricingCatalog,
   SNAPSHOT_SYNCED_AT,
 } from '../src/index'
+// `flatSchedule` is a building block, not part of the public API.
+import { flatSchedule } from '../src/internal'
 
 const usd = (n: number): string => `$${n.toFixed(4)}`
 const section = (title: string): void => console.log(`\n\u001B[1m── ${title}\u001B[0m`)
@@ -149,7 +150,7 @@ console.log(`  total ${usd(total)}`)
 // The two DeepSeek rows are identical apart from the hour, and differ 2x.
 // That only works because the query grouped by the UTC hour — ask the
 // catalogue which models are worth splitting:
-console.log('  split these in SQL:', offline.timeSensitiveSqlPatterns)
+console.log('  split these in SQL:', offline.timeSensitiveSqlPatterns())
 
 // ---------------------------------------------------------------------
 section('9. Your own prices')
@@ -194,5 +195,5 @@ for (const id of ['claude-opus-5', 'glm-5', 'kimi-k2-thinking', 'gemini-3-pro'])
 
 // A model the live catalogue prices differently from the bundled archive
 // becomes a two-period schedule rather than a retroactive reprice.
-const repriced = live.timeSensitiveSqlPatterns.filter(p => !p.includes('deepseek'))
+const repriced = live.timeSensitiveSqlPatterns().filter(p => !p.includes('deepseek'))
 console.log(`  repriced since the archive was cut: ${repriced.length} models`)

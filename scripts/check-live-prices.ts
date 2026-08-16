@@ -1,4 +1,4 @@
-import { defaultCatalog, pricingCandidates } from '../src/index'
+import { getDefaultCatalog, pricingCandidates } from '../src/index'
 
 // Model strings shaped the way agent CLIs and codetime rows actually
 // store them: bare ids, dated ids, vendor-prefixed, dotted, effort
@@ -48,15 +48,16 @@ const CASES: Array<[string, string]> = [
   ['cohere', 'command-a'],
 ]
 
-await defaultCatalog.ensureLoaded()
-console.log('catalogue:', JSON.stringify(defaultCatalog.state()))
+const catalog = getDefaultCatalog()
+await catalog.ensureLoaded()
+console.log('catalogue:', JSON.stringify(catalog.state()))
 
 const per = new Map<string, { hit: number, total: number }>()
 const misses: string[] = []
 const rows: string[] = []
 
 for (const [vendor, model] of CASES) {
-  const p = defaultCatalog.getPrice(model)
+  const p = catalog.getPrice(model)
   const stat = per.get(vendor) ?? { hit: 0, total: 0 }
   stat.total++
   const ok = p != null && p.source !== 'missing' && p.inputCostPerToken > 0
