@@ -1,8 +1,9 @@
 import type { PricingSource } from '../src/sources'
+import type { PriceSchedule, Rates } from '../src/types'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { memoryCache } from '../src/cache'
 import { PricingCatalog } from '../src/catalog'
 import { parseOpenRouterModels } from '../src/catalog/openrouter'
@@ -14,6 +15,16 @@ import { PRICE_ANCHOR_COLUMN } from '../src/row'
 
 // Each of these reproduces a defect found by review. They are grouped by
 // what actually goes wrong for a caller, not by which file holds the bug.
+
+/** A flat rate card at `perMTok` dollars per million input tokens. */
+function rates(perMTok: number): Rates {
+  return flatSchedule('x', perMTok / 1e6, perMTok / 1e7, perMTok * 4 / 1e6, undefined, 'fallback').periods[0]!.rates
+}
+
+/** A catalogue whose only model `m` runs the given schedule. */
+function build(periods: PriceSchedule['periods'], sqlMatch: string[] = ['%m%']): PricingCatalog {
+  return new PricingCatalog({ sources: [], fallback: { m: { displayName: 'M', source: 'fallback', sqlMatch, periods } } })
+}
 
 function stubSource(name: string, table: Record<string, number>): PricingSource {
   return {
@@ -393,5 +404,90 @@ describe('token counts arrive in whatever shape the driver used', () => {
     // token counts itself.
     expect(costFromRates(rates, { inputTokens: 1_000_000n as unknown as number, cachedInputTokens: 0, outputTokens: 0 })).toBeCloseTo(1, 10)
     expect(costFromRates(rates, { inputTokens: '1000000' as unknown as number, cachedInputTokens: 0, outputTokens: 0 })).toBeCloseTo(1, 10)
+  })
+})
+
+describe('a schedule the caller supplied must not silently mis-price', () => {
+  it('does not crash on a schedule with no periods', () => {
+    const catalog = build([])
+    expect(() => catalog.getPrice('m')).not.toThrow()
+    expect(catalog.getPrice('m')).toBeNull()
+  })
+
+  it('reads periods in time order however they were listed', () => {
+    // `periodAt` walks until the first period that starts later, so an
+    // out-of-order list silently returns the wrong era's rate.
+    const catalog = build([
+      { from: Date.UTC(2026, 6, 1), rates: rates(10) },
+      { from: Number.NEGATIVE_INFINITY, rates: rates(1) },
+    ])
+    expect(catalog.getPrice('m', Date.UTC(2026, 7, 1))!.inputCostPerToken).toBeCloseTo(10e-6, 15)
+    expect(catalog.getPrice('m', Date.UTC(2026, 0, 1))!.inputCostPerToken).toBeCloseTo(1e-6, 15)
+  })
+
+  it('keeps a blended rate inside [off-peak, peak] whatever the windows say', () => {
+    const day: readonly [number, number] = [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 2)]
+    const tokens = { inputTokens: 1e6, cachedInputTokens: 0, outputTokens: 0 }
+    for (const windowsUtc of [
+      [[4, 1]], // reversed: produced a NEGATIVE peak duration
+      [[25, 30]], // hours that do not exist
+      [[-2, 3]], // ...nor these
+      [[1, 5], [3, 8]], // overlapping: the shared hours were counted twice
+    ] as Array<Array<[number, number]>>) {
+      const catalog = build([{ from: Number.NEGATIVE_INFINITY, rates: rates(1), peak: { windowsUtc, rates: rates(2) } }])
+      const cost = catalog.estimate({ model: 'm', window: day, ...tokens }).cost
+      expect(cost, `windows ${JSON.stringify(windowsUtc)}`).toBeGreaterThanOrEqual(1)
+      expect(cost, `windows ${JSON.stringify(windowsUtc)}`).toBeLessThanOrEqual(2)
+    }
+  })
+
+  it('counts overlapping peak windows once', () => {
+    // [1,5) and [3,8) cover 7 hours, not 9.
+    const catalog = build([{ from: Number.NEGATIVE_INFINITY, rates: rates(1), peak: { windowsUtc: [[1, 5], [3, 8]], rates: rates(2) } }])
+    const cost = catalog.estimate({
+      model: 'm',
+      window: [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 2)],
+      inputTokens: 1e6,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    }).cost
+    expect(cost).toBeCloseTo((7 * 2 + 17 * 1) / 24, 10)
+  })
+
+  it('warns when a time-sensitive schedule cannot tell the query layer about itself', () => {
+    // Without `sqlMatch` no LIKE pattern is emitted, so every row blends
+    // across the request window instead of pricing exactly — quietly.
+    const warn = vi.fn()
+    const catalog = new PricingCatalog({
+      sources: [],
+      onWarn: warn,
+      fallback: {
+        m: {
+          displayName: 'M',
+          source: 'fallback',
+          periods: [
+            { from: Number.NEGATIVE_INFINITY, rates: rates(1) },
+            { from: Date.UTC(2026, 6, 1), rates: rates(9) },
+          ],
+        },
+      },
+    })
+    expect(catalog.timeSensitiveSqlPatterns()).toEqual(['%deepseek%'])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('sqlMatch'), undefined)
+  })
+})
+
+describe('a long-lived process must not grow without bound', () => {
+  it('caps the resolved-lookup memo', () => {
+    // The memo is keyed by the raw stored string. Anywhere a model name can
+    // reach it from user input, an unbounded Map is a leak that outlives
+    // every request.
+    const catalog = new PricingCatalog({ sources: [] })
+    for (let i = 0; i < 60_000; i++) {
+      catalog.getPrice(`junk-model-${i}`)
+    }
+    expect(catalog.resolvedSize).toBeLessThanOrEqual(50_000)
+    // ...and it still works afterwards.
+    expect(catalog.getPrice('claude-opus-5')?.inputCostPerToken).toBe(5e-6)
   })
 })

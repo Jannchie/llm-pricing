@@ -7,6 +7,7 @@ import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
 import { costFromRates } from './estimate'
+import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
 import { estimateCostFromRow as estimateRow } from './row'
@@ -109,6 +110,21 @@ export type EstimateArgs = TokenCounts & {
   window?: readonly [TimeInput, TimeInput]
 }
 
+/** Normalise a whole table, dropping the schedules that cannot price. */
+function normalizeTable(
+  table: Record<string, PriceSchedule>,
+  onWarn: (message: string, error: unknown) => void,
+): Record<string, PriceSchedule> {
+  const out: Record<string, PriceSchedule> = {}
+  for (const [id, schedule] of Object.entries(table)) {
+    const normalized = normalizeSchedule(schedule, onWarn, id)
+    if (normalized) {
+      out[id] = normalized
+    }
+  }
+  return out
+}
+
 export class PricingCatalog {
   private readonly sources: PricingSource[]
   private readonly refreshMs: number
@@ -137,7 +153,24 @@ export class PricingCatalog {
    */
   private readonly resolved = new Map<string, PriceSchedule | null>()
 
+  /**
+   * Cap on the memo above. It is keyed by the raw stored string, so
+   * anywhere a model name reaches it from user input an unbounded Map is a
+   * leak that outlives every request. Cleared wholesale rather than evicted
+   * one at a time: the working set of a real deployment is a few hundred
+   * names, so hitting this at all means the keys are not model names.
+   */
+  private static readonly RESOLVED_LIMIT = 50_000
+
+  /** Entries currently memoised. Exposed for tests and diagnostics. */
+  get resolvedSize(): number {
+    return this.resolved.size
+  }
+
   constructor(options: PricingCatalogOptions = {}) {
+    this.onWarn = options.onWarn ?? ((message, error) => {
+      console.warn(`[llm-pricing] ${message}:`, error instanceof Error ? error.message : error)
+    })
     this.sources = options.sources ?? [modelsDevSource()]
     this.refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS
     this.retryMs = options.retryMs ?? DEFAULT_RETRY_MS
@@ -145,12 +178,12 @@ export class PricingCatalog {
     this.cacheTtlMs = options.cacheTtlMs ?? this.refreshMs
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    this.overrides = { ...OVERRIDES, ...options.overrides }
-    this.fallback = { ...FALLBACK, ...options.fallback }
+    // Normalised at ingest, not per lookup: the pricing primitives run once
+    // per row and check nothing, so this is the only place the invariants
+    // they assume can be enforced.
+    this.overrides = normalizeTable({ ...OVERRIDES, ...options.overrides }, this.onWarn)
+    this.fallback = normalizeTable({ ...FALLBACK, ...options.fallback }, this.onWarn)
     this.archiveObservedAt = options.archiveObservedAt ?? SNAPSHOT_SYNCED_AT_MS
-    this.onWarn = options.onWarn ?? ((message, error) => {
-      console.warn(`[llm-pricing] ${message}:`, error instanceof Error ? error.message : error)
-    })
   }
 
   /**
@@ -349,8 +382,12 @@ export class PricingCatalog {
         const result = await this.fetchSource(source, force)
         const parsed = source.parse(JSON.parse(result.body))
         for (const [key, schedule] of parsed) {
-          if (!merged.has(key)) {
-            merged.set(key, schedule)
+          if (merged.has(key)) {
+            continue
+          }
+          const normalized = normalizeSchedule(schedule, this.onWarn, key)
+          if (normalized) {
+            merged.set(key, normalized)
           }
         }
         loaded.push(source.name)
@@ -416,6 +453,9 @@ export class PricingCatalog {
       return cached
     }
     const schedule = this.resolveSchedule(model)
+    if (this.resolved.size >= PricingCatalog.RESOLVED_LIMIT) {
+      this.resolved.clear()
+    }
     this.resolved.set(model, schedule)
     return schedule
   }

@@ -185,7 +185,7 @@ They are there so the package can be extended, not so it can be used. **Their si
 
 ```bash
 pnpm install
-pnpm test        # 161 tests, no network
+pnpm test        # 177 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

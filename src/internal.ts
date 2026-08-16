@@ -13,6 +13,9 @@ export { MODELS_DEV_URL, parseModelsDev } from './catalog/modelsdev'
 export type { OpenRouterModelsResponse } from './catalog/openrouter'
 export { OPENROUTER_MODELS_URL, parseOpenRouterModels } from './catalog/openrouter'
 export { OVERRIDES } from './catalog/overrides'
+export type { SnapshotEntry, SnapshotModels, SnapshotPeriod, SyncResult } from './catalog/sync'
+export { mergeSnapshot, SYNC_PROVIDERS } from './catalog/sync'
+export { normalizeSchedule } from './normalize'
 export {
   flatSchedule,
   mergeLiveQuote,
