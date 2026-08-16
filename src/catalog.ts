@@ -2,7 +2,7 @@ import type { PricingCache } from './cache'
 import type { TokenCounts } from './estimate'
 import type { RowOptions } from './row'
 import type { PricingSource } from './sources'
-import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates, TimeInput } from './types'
+import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceBasis, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
@@ -11,7 +11,7 @@ import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
 import { estimateCostFromRow as estimateRow } from './row'
-import { isTimeSensitive, ratesFor } from './schedule'
+import { isTimeSensitive, ratesFor, toMs } from './schedule'
 import { modelsDevSource } from './sources'
 
 const DEFAULT_REFRESH_MS = 24 * 60 * 60 * 1000
@@ -531,6 +531,58 @@ export class PricingCatalog {
    */
   private readonly priceCards = new WeakMap<Rates, ModelPrice>()
 
+  /**
+   * Blended rate cards, memoised per schedule and window.
+   *
+   * Flat and exact rows hand back a card the schedule already owns, so the
+   * memo above hits and every such row shares one `ModelPrice`. A blend
+   * does not: `weightedRates` computes a fresh object per call, so every
+   * blended row used to mint its own card and its own WeakMap entry. That
+   * made two things wrong at once — thousands of allocations where one
+   * would do, and, because a `ModelPrice` is identified by object identity,
+   * `sumEstimates` reporting one entry per row instead of one per distinct
+   * price. A thousand identical blended rows produced a thousand "distinct"
+   * rate cards.
+   *
+   * Keyed by the window because that is the only input a blend depends on;
+   * the schedule is the outer key so entries die with it.
+   */
+  private readonly blends = new WeakMap<NormalizedSchedule, Map<string, { rates: Rates, basis: PriceBasis, cards?: Rates[] }>>()
+
+  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs): { rates: Rates, basis: PriceBasis, cards?: Rates[] } {
+    // Only a blend can benefit, and only a windowed one is repeated across
+    // rows: `at` differs per row by construction, so memoising it would be
+    // a cache that never hits.
+    if (args.at !== undefined && args.at !== null) {
+      return ratesFor(schedule, args.at, args.window)
+    }
+    const window = args.window
+    if (!window) {
+      return ratesFor(schedule, args.at, args.window)
+    }
+    let byWindow = this.blends.get(schedule)
+    if (!byWindow) {
+      byWindow = new Map()
+      this.blends.set(schedule, byWindow)
+    }
+    // Normalised to epoch ms, not stringified as given: a caller passing a
+    // `Date` where another passed a number names the same window, and two
+    // keys for one window would put two "distinct" cards in every total.
+    const key = `${toMs(window[0])}|${toMs(window[1])}`
+    let hit = byWindow.get(key)
+    if (!hit) {
+      // Same bound as the resolved-lookup memo, for the same reason: the
+      // key comes from request parameters, so an unbounded map outlives
+      // every request that filled it.
+      if (byWindow.size >= RESOLVED_LIMIT) {
+        byWindow.clear()
+      }
+      hit = ratesFor(schedule, args.at, window)
+      byWindow.set(key, hit)
+    }
+    return hit
+  }
+
   private priceCardFor(schedule: PriceSchedule, rates: Rates): ModelPrice {
     const cached = this.priceCards.get(rates)
     if (cached) {
@@ -570,7 +622,7 @@ export class PricingCatalog {
     if (!schedule) {
       return { cost: 0, pricing: null, basis: 'flat', low: 0, high: 0, tokens }
     }
-    const { rates, basis, cards } = ratesFor(schedule, args.at, args.window)
+    const { rates, basis, cards } = this.ratesForMemo(schedule, args)
     const cost = costFromRates(rates, args)
     // Cost is linear in the rates, so the blend's cost is the same weighted
     // average of the cards' costs — it cannot fall outside them, and these

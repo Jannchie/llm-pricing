@@ -158,6 +158,30 @@ describe('sumestimates', () => {
     expect(second.cards).toHaveLength(0)
   })
 
+  it('reports one card for many identical blended rows', () => {
+    // A blend computes its rate card fresh every call, so each blended row
+    // used to mint its own `ModelPrice` — and cards are identified by
+    // object identity, so 1,000 identical rows reported 1,000 distinct
+    // "rates". The card list is serialised into API responses; unbounded
+    // growth there is the visible half of the bug.
+    const many = Array.from({ length: 1000 }, () =>
+      catalog.estimate({ model: 'deepseek-v4-flash', ...MTOK, window: DAY }))
+    const total = sumEstimates(many)
+    expect(total.cards).toHaveLength(1)
+    expect(total.cards[0]!.count).toBe(1000)
+    expect(total.cards[0]!.cost).toBeCloseTo(total.cost, 8)
+  })
+
+  it('still separates blends that really are different prices', () => {
+    // The memo is keyed by window, so two different windows must not
+    // collapse into one card just because they share a schedule.
+    const total = sumEstimates([
+      catalog.estimate({ model: 'deepseek-v4-flash', ...MTOK, window: DAY }),
+      catalog.estimate({ model: 'deepseek-v4-flash', ...MTOK, window: [Date.UTC(2026, 8, 1, 1), Date.UTC(2026, 8, 1, 4)] }),
+    ])
+    expect(total.cards).toHaveLength(2)
+  })
+
   it('accepts any iterable, so a cursor never has to be materialised', () => {
     expect(sumEstimates(stream()).cost).toBeCloseTo(15, 10)
   })

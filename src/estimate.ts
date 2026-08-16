@@ -91,12 +91,36 @@ interface BilledTokens {
   fresh: number
   creationDefault: number
   creation1h: number
+  /** Reported as cache reads, billed at `cacheReadInputCostPerToken`. */
   cacheRead: number
+  /**
+   * Derived from `cachedInputTokens` because no cache-read count was
+   * reported, and billed at `cachedInputCostPerToken`. Every catalogue
+   * quotes the two rates identically today (verified across all 8,352 rate
+   * cards in the bundled tables and the live models.dev feed), so this
+   * splits a bucket without moving a number — but it stops the second rate
+   * from being a field the package publishes and never bills, which is
+   * what it was.
+   */
+  cachedRead: number
   output: number
 }
 
 function billedTokens(tokens: TokenCounts): BilledTokens {
-  const cacheCreation = count(tokens.cacheCreationInputTokens)
+  // The splits are subsets of the total, so a row carrying splits but no
+  // total is still describing creation tokens — reading the total alone
+  // bills every one of them at zero.
+  //
+  // Only when the total is absent, though. A total that merely *disagrees*
+  // with its splits is malformed in the other direction, and there the
+  // total is the safer of the two: the clamp below is what keeps an
+  // over-counted 1h split from billing more creation tokens than were
+  // written, and real stores have rows like that (27 of 93,626 in the one
+  // this was measured against).
+  const reportedCreation = count(tokens.cacheCreationInputTokens)
+  const cacheCreation = reportedCreation > 0
+    ? reportedCreation
+    : count(tokens.cacheCreation5mInputTokens) + count(tokens.cacheCreation1hInputTokens)
   // Split the cache-creation total by ephemeral TTL. `known1h` is clamped
   // to the total so a malformed/over-counted 1h split can never bill more
   // creation tokens than were actually written. Everything else (the 5m
@@ -115,9 +139,8 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
   // cheaper cache-read rate.
   const explicitCacheRead = count(tokens.cacheReadInputTokens)
   const cached = count(tokens.cachedInputTokens)
-  const cacheRead = explicitCacheRead > 0
-    ? explicitCacheRead
-    : Math.max(0, cached - cacheCreation)
+  const cachedRead = explicitCacheRead > 0 ? 0 : Math.max(0, cached - cacheCreation)
+  const cacheRead = explicitCacheRead
   // Whether the cache counts are already inside `inputTokens` is a property
   // of whoever wrote the row, not of the vendor — see `inputIncludesCache`.
   // `cachedInputTokens` is carved out either way: it is a subset by
@@ -125,13 +148,13 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
   const input = count(tokens.inputTokens)
   const fresh = tokens.inputIncludesCache === false
     ? Math.max(0, input - Math.min(cached, input))
-    : Math.max(0, input - cacheCreation - cacheRead)
+    : Math.max(0, input - cacheCreation - cacheRead - cachedRead)
   // Gemini reports reasoning beside the output count rather than inside it,
   // and Google bills it at the output rate — so for that producer it has to
   // be added, not ignored.
   const output = count(tokens.outputTokens)
     + (tokens.reasoningIncludedInOutput === false ? count(tokens.reasoningOutputTokens) : 0)
-  return { fresh, creationDefault: creationDefaultRate, creation1h: known1h, cacheRead, output }
+  return { fresh, creationDefault: creationDefaultRate, creation1h: known1h, cacheRead, cachedRead, output }
 }
 
 /**
@@ -146,6 +169,7 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
     + b.creationDefault * rates.cacheCreationInputCostPerToken
     + b.creation1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
     + b.cacheRead * rates.cacheReadInputCostPerToken
+    + b.cachedRead * rates.cachedInputCostPerToken
     + b.output * rates.outputCostPerToken
 }
 
@@ -159,5 +183,5 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
  */
 export function tokensBilled(tokens: TokenCounts): number {
   const b = billedTokens(tokens)
-  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead + b.output
+  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead + b.cachedRead + b.output
 }
