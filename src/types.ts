@@ -20,6 +20,17 @@ export const RATE_KEYS = [
   'inputCostPerToken',
   'cacheCreationInputCostPerToken',
   'cacheReadInputCostPerToken',
+  // An alias of `cacheReadInputCostPerToken`, not a fifth priced dimension.
+  // "Cached input" (OpenAI's word) and "cache read" (Anthropic's) name one
+  // thing, and no vendor charges them differently — every producer in this
+  // package assigns both from a single value, and all 8,352 rate cards in
+  // the bundled tables and the live models.dev feed quote them equal.
+  //
+  // It is therefore never multiplied by a token count of its own: which of
+  // the two count fields a row happens to fill in is a property of the
+  // collector, not of the vendor, so selecting a *rate* from it would put a
+  // pricing decision on the wrong side of that line. Kept because it is
+  // published on `ModelPrice` and callers display it.
   'cachedInputCostPerToken',
   'outputCostPerToken',
 ] as const

@@ -91,18 +91,7 @@ interface BilledTokens {
   fresh: number
   creationDefault: number
   creation1h: number
-  /** Reported as cache reads, billed at `cacheReadInputCostPerToken`. */
   cacheRead: number
-  /**
-   * Derived from `cachedInputTokens` because no cache-read count was
-   * reported, and billed at `cachedInputCostPerToken`. Every catalogue
-   * quotes the two rates identically today (verified across all 8,352 rate
-   * cards in the bundled tables and the live models.dev feed), so this
-   * splits a bucket without moving a number — but it stops the second rate
-   * from being a field the package publishes and never bills, which is
-   * what it was.
-   */
-  cachedRead: number
   output: number
 }
 
@@ -117,10 +106,11 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
   // over-counted 1h split from billing more creation tokens than were
   // written, and real stores have rows like that (27 of 93,626 in the one
   // this was measured against).
-  const reportedCreation = count(tokens.cacheCreationInputTokens)
-  const cacheCreation = reportedCreation > 0
-    ? reportedCreation
-    : count(tokens.cacheCreation5mInputTokens) + count(tokens.cacheCreation1hInputTokens)
+  const creation1h = count(tokens.cacheCreation1hInputTokens)
+  // `count` yields 0 or a positive finite number, so `||` is exactly the
+  // "absent, fall back" test.
+  const cacheCreation = count(tokens.cacheCreationInputTokens)
+    || count(tokens.cacheCreation5mInputTokens) + creation1h
   // Split the cache-creation total by ephemeral TTL. `known1h` is clamped
   // to the total so a malformed/over-counted 1h split can never bill more
   // creation tokens than were actually written. Everything else (the 5m
@@ -128,7 +118,7 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
   // only the 1h portion takes the 2x input rate. When the 1h split is 0
   // (legacy / split-unknown), this collapses to the original single-rate
   // formula exactly.
-  const known1h = Math.min(count(tokens.cacheCreation1hInputTokens), cacheCreation)
+  const known1h = Math.min(creation1h, cacheCreation)
   const creationDefaultRate = Math.max(0, cacheCreation - known1h)
   // Codex / OpenAI emit only `cachedInputTokens` (a subset of input) and
   // never split it into cache_read vs cache_creation. Clients therefore
@@ -137,10 +127,8 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
   // read from `cachedInputTokens` — otherwise 90%+ of Codex input would
   // silently get charged at the full prompt rate instead of the much
   // cheaper cache-read rate.
-  const explicitCacheRead = count(tokens.cacheReadInputTokens)
   const cached = count(tokens.cachedInputTokens)
-  const cachedRead = explicitCacheRead > 0 ? 0 : Math.max(0, cached - cacheCreation)
-  const cacheRead = explicitCacheRead
+  const cacheRead = count(tokens.cacheReadInputTokens) || Math.max(0, cached - cacheCreation)
   // Whether the cache counts are already inside `inputTokens` is a property
   // of whoever wrote the row, not of the vendor — see `inputIncludesCache`.
   // `cachedInputTokens` is carved out either way: it is a subset by
@@ -148,13 +136,13 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
   const input = count(tokens.inputTokens)
   const fresh = tokens.inputIncludesCache === false
     ? Math.max(0, input - Math.min(cached, input))
-    : Math.max(0, input - cacheCreation - cacheRead - cachedRead)
+    : Math.max(0, input - cacheCreation - cacheRead)
   // Gemini reports reasoning beside the output count rather than inside it,
   // and Google bills it at the output rate — so for that producer it has to
   // be added, not ignored.
   const output = count(tokens.outputTokens)
     + (tokens.reasoningIncludedInOutput === false ? count(tokens.reasoningOutputTokens) : 0)
-  return { fresh, creationDefault: creationDefaultRate, creation1h: known1h, cacheRead, cachedRead, output }
+  return { fresh, creationDefault: creationDefaultRate, creation1h: known1h, cacheRead, output }
 }
 
 /**
@@ -169,7 +157,6 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
     + b.creationDefault * rates.cacheCreationInputCostPerToken
     + b.creation1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
     + b.cacheRead * rates.cacheReadInputCostPerToken
-    + b.cachedRead * rates.cachedInputCostPerToken
     + b.output * rates.outputCostPerToken
 }
 
@@ -183,5 +170,5 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
  */
 export function tokensBilled(tokens: TokenCounts): number {
   const b = billedTokens(tokens)
-  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead + b.cachedRead + b.output
+  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead + b.output
 }

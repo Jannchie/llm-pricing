@@ -172,6 +172,52 @@ describe('sumestimates', () => {
     expect(total.cards[0]!.cost).toBeCloseTo(total.cost, 8)
   })
 
+  it('groups by price, not by which object produced it', () => {
+    // `sumEstimates` takes any iterable, so it cannot require that its
+    // input came from one catalogue. Grouping on object identity would make
+    // the answer depend on a private memo inside `PricingCatalog`: a second
+    // instance, an evicted cache slot, or a trip through JSON would each
+    // split one price into many entries — the exact failure this function
+    // exists to prevent.
+    const other = new PricingCatalog({ sources: [] })
+    const mine = catalog.estimate({ model: 'claude-opus-5', ...MTOK })
+    const total = sumEstimates([
+      mine,
+      other.estimate({ model: 'claude-opus-5', ...MTOK }),
+      JSON.parse(JSON.stringify(mine)) as typeof mine,
+    ])
+    expect(total.cards).toHaveLength(1)
+    expect(total.cards[0]!.count).toBe(3)
+  })
+
+  it('keeps genuinely different prices apart', () => {
+    const total = sumEstimates([
+      catalog.estimate({ model: 'claude-opus-5', ...MTOK }),
+      catalog.estimate({ model: 'gpt-5.5', ...MTOK }),
+    ])
+    expect(total.cards).toHaveLength(2)
+  })
+
+  it('treats a window written backwards as the same window', () => {
+    // `ratesFor` normalises a reversed window because an interval is not an
+    // ordered pair. Anything downstream that keys on the window has to
+    // agree, or one interval yields two "prices" that are the same number.
+    const total = sumEstimates([
+      catalog.estimate({ model: 'deepseek-v4-flash', ...MTOK, window: DAY }),
+      catalog.estimate({ model: 'deepseek-v4-flash', ...MTOK, window: [DAY[1], DAY[0]] }),
+    ])
+    expect(total.cards).toHaveLength(1)
+  })
+
+  it('prices an open-ended window against the clock, not a stored answer', () => {
+    // A window with an unparseable or missing bound sends `ratesFor` to the
+    // rate in force *now* — a moving answer, so it must never be served
+    // from the blend slot.
+    const open = catalog.estimate({ model: 'deepseek-v4-flash', ...MTOK, window: [DAY[0], null] })
+    expect(open.basis).toBe('blended')
+    expect(Number.isFinite(open.cost)).toBe(true)
+  })
+
   it('still separates blends that really are different prices', () => {
     // The memo is keyed by window, so two different windows must not
     // collapse into one card just because they share a schedule.

@@ -171,25 +171,33 @@ Pass `shape` and `inferShape` here too — see [Token shapes](#token-shapes).
 
 ## API
 
-Every top-level function is a one-line forward to a `PricingCatalog` method, so the two columns below are the same API reached two ways. Use the functions when one catalogue per process is enough; hold an instance when it is not.
+Five entry points cover essentially every use:
+
+| Function | Purpose |
+| --- | --- |
+| `ensurePricingLoaded()` | Load the catalogue if stale; no-op while fresh. Safe per request. |
+| `estimateCostUsd(args)` | Token counts → `{ cost, low, high, pricing, basis, tokens }` |
+| `estimateCostFromRow(row, options?)` | The same, straight off a snake_case SQL row |
+| `sumEstimates(estimates)` | Fold many into a total that keeps provenance |
+| `getPriceFor(model, at?)` | Just the rate card, no token counts |
+
+<details>
+<summary>Everything else</summary>
+
+Each top-level function is a one-line forward to a `PricingCatalog` method — the same API reached two ways. Use the functions when one catalogue per process is enough; hold an instance when it is not (different sources, tenant isolation, a test double).
 
 | Function | Method | Purpose |
 | --- | --- | --- |
 | — | `new PricingCatalog(options)` | One catalogue and its caches |
 | `getDefaultCatalog()` / `configureDefaultCatalog(options)` | — | The shared instance, and its options |
-| `ensurePricingLoaded()` | `.ensureLoaded()` | Load if stale; no-op while fresh |
 | `refreshPricing()` | `.refresh()` | Force a reload past freshness, backoff and cache |
 | `pricingState()` | `.state()` | `{ status, loadedAt, source, size }` |
-| `getPriceFor(model, at?)` | `.getPrice(...)` | Resolve a model to a flat rate card |
-| `estimateCostUsd(args)` | `.estimate(...)` | Token counts → `{ cost, pricing, basis }` |
-| `estimateCostFromRow(row, options?)` | `.estimateFromRow(...)` | Same, from a snake_case SQL row |
 | `timeSensitiveSqlPatterns()` | `.timeSensitiveSqlPatterns()` | LIKE patterns worth splitting by hour |
 
 Standalone, no catalogue involved:
 
 | Export | Purpose |
 | --- | --- |
-| `sumEstimates(estimates)` | Fold estimates into a total that keeps provenance |
 | `costFromRates(rates, tokens)` / `tokensBilled(tokens)` | Pure arithmetic |
 | `pricingCandidates(model)` | The name normalization, exposed for reuse |
 | `modelsDevSource()` / `openRouterSource()` | Source adapters |
@@ -204,6 +212,8 @@ The pieces the package is built from — catalogue parsers (`parseModelsDev`), t
 They are there so the package can be extended, not so it can be used. **Their signatures track whatever the internals need and can change in a minor release.** Everything on the main entry is covered by semver.
 
 The schedule primitives accept only a `NormalizedSchedule` — what `normalizeSchedule` returns. They run once per priced row and so validate nothing themselves; the brand is what makes "already checked" a fact the compiler enforces rather than a convention. A schedule that reaches them unvalidated can crash (a history not reaching back to `-Infinity` leaves `blendRates` with nothing to average) or silently answer from the wrong era.
+
+</details>
 
 ## Adding up
 

@@ -92,31 +92,6 @@ describe('costfromrates', () => {
     expect(cost).toBeCloseTo(400 * RATES.cacheCreationInputCostPerToken + 100 * RATES.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER, 12)
   })
 
-  it('bills derived cache reads at the cached-input rate', () => {
-    // `cachedInputCostPerToken` is quoted by every catalogue and was
-    // multiplied by nothing — a fifth rate the package published and never
-    // billed. Reads derived from `cachedInputTokens` are exactly what it
-    // describes, so they take it; explicitly reported reads keep
-    // `cacheReadInputCostPerToken`. Every live quote sets the two equal, so
-    // this moves no number today — it removes a silent trap for the first
-    // catalogue that separates them.
-    const distinct = { ...RATES, cachedInputCostPerToken: 9e-6 }
-    const derived = costFromRates(distinct, {
-      inputTokens: 1000,
-      cachedInputTokens: 800,
-      cacheReadInputTokens: 0,
-      outputTokens: 0,
-    })
-    expect(derived).toBeCloseTo(200 * 1e-6 + 800 * 9e-6, 12)
-    const explicit = costFromRates(distinct, {
-      inputTokens: 1000,
-      cachedInputTokens: 0,
-      cacheReadInputTokens: 800,
-      outputTokens: 0,
-    })
-    expect(explicit).toBeCloseTo(200 * 1e-6 + 800 * RATES.cacheReadInputCostPerToken, 12)
-  })
-
   it('does not bill reasoning tokens on top of output', () => {
     const base = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 1000 }
     expect(costFromRates(RATES, { ...base, reasoningOutputTokens: 800 }))

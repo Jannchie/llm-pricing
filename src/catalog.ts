@@ -1,8 +1,9 @@
 import type { PricingCache } from './cache'
 import type { TokenCounts } from './estimate'
 import type { RowOptions } from './row'
+import type { ResolvedRates } from './schedule'
 import type { PricingSource } from './sources'
-import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceBasis, PriceSchedule, Rates, TimeInput } from './types'
+import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
@@ -532,55 +533,53 @@ export class PricingCatalog {
   private readonly priceCards = new WeakMap<Rates, ModelPrice>()
 
   /**
-   * Blended rate cards, memoised per schedule and window.
+   * The last blend computed for each schedule.
    *
-   * Flat and exact rows hand back a card the schedule already owns, so the
-   * memo above hits and every such row shares one `ModelPrice`. A blend
-   * does not: `weightedRates` computes a fresh object per call, so every
-   * blended row used to mint its own card and its own WeakMap entry. That
-   * made two things wrong at once — thousands of allocations where one
-   * would do, and, because a `ModelPrice` is identified by object identity,
-   * `sumEstimates` reporting one entry per row instead of one per distinct
-   * price. A thousand identical blended rows produced a thousand "distinct"
-   * rate cards.
+   * Purely an allocation optimisation. `weightedRates` builds a fresh
+   * `Rates` per call, so without this a request folding 93,000 blended rows
+   * allocates 93,000 rate cards and 93,000 `ModelPrice` wrappers where one
+   * of each would do — the memo above is keyed on the `Rates` object, so it
+   * cannot help. Nothing depends on the sharing being achieved:
+   * `sumEstimates` groups cards by value, so a miss costs time and never
+   * changes an answer.
    *
-   * Keyed by the window because that is the only input a blend depends on;
-   * the schedule is the outer key so entries die with it.
+   * One slot, not a map. A request folds every row against a single
+   * window, so a second slot would never be read, and a map keyed by
+   * request parameters is an unbounded structure hanging off schedules that
+   * — for flat models — the constructor owns and never releases.
    */
-  private readonly blends = new WeakMap<NormalizedSchedule, Map<string, { rates: Rates, basis: PriceBasis, cards?: Rates[] }>>()
+  private readonly lastBlend = new WeakMap<NormalizedSchedule, { from: number, to: number, resolved: ResolvedRates }>()
 
-  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs): { rates: Rates, basis: PriceBasis, cards?: Rates[] } {
-    // Only a blend can benefit, and only a windowed one is repeated across
-    // rows: `at` differs per row by construction, so memoising it would be
-    // a cache that never hits.
-    if (args.at !== undefined && args.at !== null) {
-      return ratesFor(schedule, args.at, args.window)
-    }
+  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs): ResolvedRates {
+    // Before anything else: a flat schedule ignores time entirely and
+    // returns its one card, so every step below would be work spent to
+    // memoise a `periods.length` check — and would pin a WeakMap entry to a
+    // schedule the constructor holds forever. Flat is nearly every model.
     const window = args.window
-    if (!window) {
-      return ratesFor(schedule, args.at, args.window)
+    if (!window || !isTimeSensitive(schedule) || toMs(args.at) !== null) {
+      return ratesFor(schedule, args.at, window)
     }
-    let byWindow = this.blends.get(schedule)
-    if (!byWindow) {
-      byWindow = new Map()
-      this.blends.set(schedule, byWindow)
+    const a = toMs(window[0])
+    const b = toMs(window[1])
+    // An open-ended or unparseable bound sends `ratesFor` to the rate in
+    // force *now*, which is a moving answer and so must never be stored.
+    // Only a fully-bounded window makes the result a pure function of the
+    // key.
+    if (a === null || b === null) {
+      return ratesFor(schedule, args.at, window)
     }
-    // Normalised to epoch ms, not stringified as given: a caller passing a
-    // `Date` where another passed a number names the same window, and two
-    // keys for one window would put two "distinct" cards in every total.
-    const key = `${toMs(window[0])}|${toMs(window[1])}`
-    let hit = byWindow.get(key)
-    if (!hit) {
-      // Same bound as the resolved-lookup memo, for the same reason: the
-      // key comes from request parameters, so an unbounded map outlives
-      // every request that filled it.
-      if (byWindow.size >= RESOLVED_LIMIT) {
-        byWindow.clear()
-      }
-      hit = ratesFor(schedule, args.at, window)
-      byWindow.set(key, hit)
+    // A window is an interval, not an ordered pair — `ratesFor` says so and
+    // normalises it, so the slot has to agree or the same interval written
+    // backwards misses.
+    const from = Math.min(a, b)
+    const to = Math.max(a, b)
+    const hit = this.lastBlend.get(schedule)
+    if (hit && hit.from === from && hit.to === to) {
+      return hit.resolved
     }
-    return hit
+    const resolved = ratesFor(schedule, undefined, window)
+    this.lastBlend.set(schedule, { from, to, resolved })
+    return resolved
   }
 
   private priceCardFor(schedule: PriceSchedule, rates: Rates): ModelPrice {

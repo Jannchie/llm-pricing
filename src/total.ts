@@ -1,4 +1,5 @@
 import type { CostEstimate, ModelPrice, PriceBasis } from './types'
+import { RATE_KEYS } from './types'
 
 /**
  * A sum of estimates that keeps what a bare `+=` throws away.
@@ -59,6 +60,20 @@ const EMPTY: CostTotal = {
 }
 
 /**
+ * What makes two rate cards the same price: every rate, plus where it came
+ * from. Provenance is part of it — the same numbers reached through a
+ * reseller and through the vendor are the same cost but not the same fact,
+ * and `cards` is read to answer "what was this charged at".
+ */
+function cardKey(pricing: ModelPrice): string {
+  let key = `${pricing.source}|${pricing.providerId ?? ''}|${pricing.displayName ?? ''}`
+  for (const rate of RATE_KEYS) {
+    key += `|${pricing[rate]}`
+  }
+  return key
+}
+
+/**
  * Fold estimates into one total, keeping their provenance and confidence.
  *
  * ```ts
@@ -72,9 +87,15 @@ const EMPTY: CostTotal = {
  * ```
  *
  * Accepts any iterable, so a generator over a cursor never materialises the
- * estimates. Cards are identity-keyed: the catalogue memoises one object
- * per rate card, so two rows priced identically share one entry without
- * comparing five floats per row.
+ * estimates.
+ *
+ * Two rows quoting the same price share one card entry whatever produced
+ * them — the same catalogue, two catalogues, or an estimate assembled by
+ * hand. Grouping on object identity would have been cheaper, but it would
+ * make this function's answer depend on a private memo inside
+ * `PricingCatalog`: a cache eviction, a second instance, or a round-trip
+ * through JSON would silently split one price into many entries, which is
+ * the exact failure this function exists to prevent.
  */
 export function sumEstimates(estimates: Iterable<CostEstimate>): CostTotal {
   const total: CostTotal = {
@@ -83,7 +104,10 @@ export function sumEstimates(estimates: Iterable<CostEstimate>): CostTotal {
     byBasis: { flat: 0, exact: 0, blended: 0 },
     cards: [],
   }
-  const cards = new Map<ModelPrice, { pricing: ModelPrice, cost: number, count: number }>()
+  const cards = new Map<string, { pricing: ModelPrice, cost: number, count: number }>()
+  // Identity still short-circuits the key building, because the common case
+  // by far is thousands of rows sharing one memoised card.
+  const seen = new Map<ModelPrice, string>()
   for (const estimate of estimates) {
     total.count++
     total.cost += estimate.cost
@@ -96,13 +120,18 @@ export function sumEstimates(estimates: Iterable<CostEstimate>): CostTotal {
       continue
     }
     total.tokens += estimate.tokens
-    const entry = cards.get(estimate.pricing)
+    let key = seen.get(estimate.pricing)
+    if (key === undefined) {
+      key = cardKey(estimate.pricing)
+      seen.set(estimate.pricing, key)
+    }
+    const entry = cards.get(key)
     if (entry) {
       entry.cost += estimate.cost
       entry.count++
     }
     else {
-      cards.set(estimate.pricing, { pricing: estimate.pricing, cost: estimate.cost, count: 1 })
+      cards.set(key, { pricing: estimate.pricing, cost: estimate.cost, count: 1 })
     }
   }
   total.cards = [...cards.values()].sort((a, b) => b.cost - a.cost)

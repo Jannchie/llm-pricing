@@ -88,15 +88,6 @@ export function peakMsBetween(windows: Array<[number, number]>, fromMs: number, 
 }
 
 /**
- * Degraded path: the row is a sum over a whole window, so we no longer know
- * which hours its tokens were spent in. Blend the schedule across the
- * window by wall-clock time — i.e. assume usage is spread evenly. That is
- * wrong for a user who only ever codes during peak hours, but it is
- * bounded (never outside [off-peak, peak]) and it is the honest answer when
- * the time axis has already been aggregated away. Callers that *do* have a
- * timestamp pass `at` instead and get the exact rate.
- */
-/**
  * The rate cards a blend draws on, with the wall-clock weight each carries.
  *
  * Separate from `blendRates` because the weighted average throws away the
@@ -138,25 +129,47 @@ export function blendParts(
   return parts
 }
 
+/**
+ * Degraded path: the row is a sum over a whole window, so we no longer know
+ * which hours its tokens were spent in. Blend the schedule across the
+ * window by wall-clock time — i.e. assume usage is spread evenly. That is
+ * wrong for a user who only ever codes during peak hours, but it is
+ * bounded (never outside [off-peak, peak]) and it is the honest answer when
+ * the time axis has already been aggregated away. Callers that *do* have a
+ * timestamp pass `at` instead and get the exact rate.
+ */
 export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number): Rates {
   return weightedRates(blendParts(schedule, fromMs, toMs))
+}
+
+/**
+ * A schedule resolved to one rate card, with how that was arrived at.
+ *
+ * Named because three places hold it: `ratesFor` returns it, and the
+ * catalogue both stores and returns it.
+ */
+export interface ResolvedRates {
+  rates: Rates
+  basis: PriceBasis
+  /**
+   * The distinct cards a blend averaged — the material for a cost
+   * interval. Absent on every other path, which priced against exactly one
+   * card and has nothing to bound.
+   */
+  cards?: Rates[]
 }
 
 /**
  * Resolve a schedule to the one flat rate card that applies, either at an
  * instant (`at`) or averaged across a window. Both are ignored for models
  * with a flat schedule, which is nearly all of them.
- *
- * `cards` is populated only for a blend, and holds the distinct cards that
- * went into it — the material for a cost interval. Every other path priced
- * against exactly one card and has nothing to bound.
  */
 export function ratesFor(
   schedule: NormalizedSchedule,
   at: TimeInput,
   window: readonly [TimeInput, TimeInput] | undefined,
   now: number = Date.now(),
-): { rates: Rates, basis: PriceBasis, cards?: Rates[] } {
+): ResolvedRates {
   if (!isTimeSensitive(schedule)) {
     return { rates: schedule.periods[0]!.rates, basis: 'flat' }
   }
