@@ -35,13 +35,30 @@ export interface TokenCounts {
 }
 
 /**
+ * A token count, or 0 for anything that is not a usable one.
+ *
+ * Negatives are a caller bug that would *subtract* from the bill, and NaN
+ * or Infinity propagates through every sum it reaches — one bad row turns a
+ * whole aggregate into NaN, which loses more than a wrong number would.
+ * Both become 0, the value a missing count already had.
+ *
+ * Coerced rather than type-checked, so the counts a driver hands back —
+ * `bigint` for a Postgres bigint, a string for a numeric — still bill
+ * instead of silently reading as zero.
+ */
+function count(value: unknown): number {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/**
  * Apply a resolved rate card to a set of token counts.
  *
  * Pure and stateless — every catalogue/schedule decision has already been
  * made by the time this runs, which is what makes it exhaustively testable.
  */
 export function costFromRates(rates: Rates, tokens: TokenCounts): number {
-  const cacheCreation = Math.max(0, tokens.cacheCreationInputTokens ?? 0)
+  const cacheCreation = count(tokens.cacheCreationInputTokens)
   // Split the cache-creation total by ephemeral TTL. `known1h` is clamped
   // to the total so a malformed/over-counted 1h split can never bill more
   // creation tokens than were actually written. Everything else (the 5m
@@ -49,7 +66,7 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
   // only the 1h portion takes the 2x input rate. When the 1h split is 0
   // (legacy / split-unknown), this collapses to the original single-rate
   // formula exactly.
-  const known1h = Math.min(Math.max(0, tokens.cacheCreation1hInputTokens ?? 0), cacheCreation)
+  const known1h = Math.min(count(tokens.cacheCreation1hInputTokens), cacheCreation)
   const creationDefaultRate = Math.max(0, cacheCreation - known1h)
   // Codex / OpenAI emit only `cachedInputTokens` (a subset of input) and
   // never split it into cache_read vs cache_creation. Clients therefore
@@ -58,15 +75,12 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
   // read from `cachedInputTokens` — otherwise 90%+ of Codex input would
   // silently get charged at the full prompt rate instead of the much
   // cheaper cache-read rate.
-  const explicitCacheRead = Math.max(0, tokens.cacheReadInputTokens ?? 0)
+  const explicitCacheRead = count(tokens.cacheReadInputTokens)
   const cacheRead = explicitCacheRead > 0
     ? explicitCacheRead
-    : Math.max(0, tokens.cachedInputTokens - cacheCreation)
-  const fresh = Math.max(0, tokens.inputTokens - cacheCreation - cacheRead)
-  // Clamped like every other count. A negative total is always a caller
-  // bug, but left alone it *subtracts* from the bill, so a single bad row
-  // silently discounts every aggregate it is summed into.
-  const output = Math.max(0, tokens.outputTokens)
+    : Math.max(0, count(tokens.cachedInputTokens) - cacheCreation)
+  const fresh = Math.max(0, count(tokens.inputTokens) - cacheCreation - cacheRead)
+  const output = count(tokens.outputTokens)
   return fresh * rates.inputCostPerToken
     + creationDefaultRate * rates.cacheCreationInputCostPerToken
     + known1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER

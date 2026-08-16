@@ -15,6 +15,7 @@ import { modelsDevSource } from './sources'
 
 const DEFAULT_REFRESH_MS = 24 * 60 * 60 * 1000
 const DEFAULT_RETRY_MS = 5 * 60 * 1000
+const DEFAULT_TIMEOUT_MS = 30 * 1000
 
 export interface PricingCatalogOptions {
   /**
@@ -60,6 +61,14 @@ export interface PricingCatalogOptions {
   cacheTtlMs?: number
   /** Injected for tests and for runtimes with a non-global fetch. */
   fetch?: typeof globalThis.fetch
+  /**
+   * How long to wait for a source before giving up on it. Default: 30s.
+   *
+   * `ensureLoaded()` is meant to be safe on a per-request path, and an
+   * upstream that accepts the connection and then never answers would
+   * otherwise hang every caller indefinitely.
+   */
+  timeoutMs?: number
   /**
    * Extra schedules that outrank every remote source, merged over the
    * built-in overrides. Keys are lowercase model ids.
@@ -107,6 +116,7 @@ export class PricingCatalog {
   private readonly cache: PricingCache | undefined
   private readonly cacheTtlMs: number
   private readonly fetchImpl: typeof globalThis.fetch
+  private readonly timeoutMs: number
   private readonly overrides: Record<string, PriceSchedule>
   private readonly fallback: Record<string, PriceSchedule>
   private readonly onWarn: (message: string, error: unknown) => void
@@ -134,6 +144,7 @@ export class PricingCatalog {
     this.cache = options.cache
     this.cacheTtlMs = options.cacheTtlMs ?? this.refreshMs
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.overrides = { ...OVERRIDES, ...options.overrides }
     this.fallback = { ...FALLBACK, ...options.fallback }
     this.archiveObservedAt = options.archiveObservedAt ?? SNAPSHOT_SYNCED_AT_MS
@@ -237,18 +248,24 @@ export class PricingCatalog {
    * retrieved from the network.
    */
   private async fetchSource(source: PricingSource, force: boolean): Promise<{ body: string, fetchedAt: number, rescued?: boolean }> {
-    const cached = this.cache ? decodeCacheEntry(await this.cache.get(source.url)) : null
+    const cached = await this.readCache(source)
     if (!force && cached && Date.now() - cached.fetchedAt < this.cacheTtlMs) {
       return cached
     }
     try {
-      const response = await this.fetchImpl(source.url, { headers: { accept: 'application/json' } })
+      // A source that never answers would otherwise hang every request that
+      // called `ensureLoaded()`, which is documented as safe on a
+      // per-request path. Falling back to the archive beats hanging.
+      const response = await this.withTimeout(this.fetchImpl(source.url, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      }))
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
       const body = await response.text()
       const fetchedAt = Date.now()
-      await this.cache?.set(source.url, encodeCacheEntry(fetchedAt, body))
+      await this.writeCache(source, fetchedAt, body)
       return { body, fetchedAt }
     }
     catch (error) {
@@ -263,6 +280,60 @@ export class PricingCatalog {
         return { ...cached, rescued: true }
       }
       throw error
+    }
+  }
+
+  /**
+   * Enforce the deadline ourselves as well as passing the signal.
+   *
+   * `AbortSignal` only helps if the fetch implementation honours it — a
+   * custom or mocked one need not, and then the timeout protects nobody.
+   * The timer is cleared on settle so it cannot hold the process open.
+   */
+  private async withTimeout<T>(work: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`timed out after ${this.timeoutMs}ms`)), this.timeoutMs)
+        }),
+      ])
+    }
+    finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * A cache is an optimisation, so neither half of it may take the
+   * catalogue down. A Redis client rejects when Redis is down; without
+   * these guards an unreachable cache would stop the source from being
+   * fetched at all, and a failed write-through would throw away a download
+   * that had already succeeded.
+   */
+  private async readCache(source: PricingSource): Promise<{ body: string, fetchedAt: number } | null> {
+    if (!this.cache) {
+      return null
+    }
+    try {
+      return decodeCacheEntry(await this.cache.get(source.url))
+    }
+    catch (error) {
+      this.onWarn(`cache unreadable for "${source.name}"`, error)
+      return null
+    }
+  }
+
+  private async writeCache(source: PricingSource, fetchedAt: number, body: string): Promise<void> {
+    if (!this.cache) {
+      return
+    }
+    try {
+      await this.cache.set(source.url, encodeCacheEntry(fetchedAt, body))
+    }
+    catch (error) {
+      this.onWarn(`cache unwritable for "${source.name}"`, error)
     }
   }
 

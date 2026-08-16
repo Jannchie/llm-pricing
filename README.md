@@ -98,6 +98,8 @@ const cache = { get: key => redis.get(key), set: (key, value) => redis.set(key, 
 
 Writes through `fileCache` are atomic, and a missing, unreadable or corrupt entry is treated as a miss. When the network is down and the cached copy has aged out, the stale copy is used anyway — last week's catalogue beats falling all the way back to the bundled archive — and `onWarn` fires.
 
+A cache that throws — a Redis client with Redis down — is warned about and ignored: it neither prevents the fetch nor discards one that succeeded. A source that accepts the connection and then never answers is abandoned after `timeoutMs` (30s), because `ensureLoaded()` is meant to be safe in front of a request.
+
 Being rescued that way is not success: `state().status` reports `stale` and the retry backoff engages, so a dead upstream is contacted once per `retryMs` rather than once per request. The same applies when one source of several fails — the models only it listed keep their prices from the previous load instead of vanishing.
 
 **Force a refresh** past the freshness window, the failure backoff and the cache:
@@ -183,7 +185,7 @@ They are there so the package can be extended, not so it can be used. **Their si
 
 ```bash
 pnpm install
-pnpm test        # 151 tests, no network
+pnpm test        # 161 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

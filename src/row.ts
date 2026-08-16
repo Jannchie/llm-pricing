@@ -65,6 +65,19 @@ function rowNum(v: unknown): number {
 }
 
 /**
+ * The anchor is documented as epoch **seconds**, and the SQL helper emits
+ * seconds. A caller who passes milliseconds would otherwise be priced at a
+ * point tens of thousands of years out — silently, and often at a
+ * plausible-looking rate, because the last period runs to infinity.
+ *
+ * Epoch seconds above 1e12 is the year 33658, so there is no real value to
+ * confuse with a millisecond timestamp.
+ */
+function anchorToMs(anchor: number): number {
+  return anchor > 1e12 ? anchor : anchor * 1000
+}
+
+/**
  * Price a raw SQL row that uses snake_case `*_tokens` column names, so
  * every cost-folding loop does not repeat the same nine coercions.
  */
@@ -77,7 +90,7 @@ export function estimateCostFromRow(
   const anchor = row[columns.priceAnchor]
   const at = anchor === null || anchor === undefined
     ? undefined
-    : rowNum(anchor) * 1000
+    : anchorToMs(rowNum(anchor))
   return catalog.estimate({
     model: String(row[columns.model] ?? 'unknown'),
     inputTokens: rowNum(row[columns.inputTokens]),

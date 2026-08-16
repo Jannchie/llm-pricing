@@ -10,6 +10,7 @@ import { costFromRates } from '../src/estimate'
 import { fileCache } from '../src/node'
 import { flatSchedule, mergeLiveQuote } from '../src/rates'
 import { pricingCandidates } from '../src/resolve'
+import { PRICE_ANCHOR_COLUMN } from '../src/row'
 
 // Each of these reproduces a defect found by review. They are grouped by
 // what actually goes wrong for a caller, not by which file holds the bug.
@@ -261,5 +262,136 @@ describe('hosted platforms and gateways wrap the vendor id', () => {
     // no price at all. Inventing one would be worse than reporting none.
     expect(catalog.getPrice('my-gpt5-deployment')).toBeNull()
     expect(catalog.getPrice('ollama/llama3')).toBeNull()
+  })
+})
+
+describe('a broken cache must not break the catalogue', () => {
+  // `fileCache` swallows its own errors, but the documented contract is
+  // "any string store", and a Redis client rejects when Redis is down.
+  const source = stubSource('a', { m: 9e-6 })
+
+  it('still fetches when the cache cannot be read', async () => {
+    let fetched = 0
+    const catalog = new PricingCatalog({
+      sources: [source],
+      cache: { get: async () => {
+        throw new Error('redis down')
+      }, set: async () => {} },
+      fetch: (async () => {
+        fetched++
+        return new Response('{}', { status: 200 })
+      }) as unknown as typeof globalThis.fetch,
+      onWarn: () => {},
+    })
+    await catalog.ensureLoaded()
+    // A cache is an optimisation. Its failure must not disable the source.
+    expect(fetched).toBe(1)
+    expect(catalog.getPrice('m')?.inputCostPerToken).toBe(9e-6)
+  })
+
+  it('keeps a successful download the cache refused to store', async () => {
+    const catalog = new PricingCatalog({
+      sources: [source],
+      cache: { get: async () => null, set: async () => {
+        throw new Error('redis down')
+      } },
+      fetch: ok,
+      onWarn: () => {},
+    })
+    await catalog.ensureLoaded()
+    // The fetch succeeded; throwing away its result because the write-through
+    // failed is the most expensive possible response to a cache problem.
+    expect(catalog.getPrice('m')?.inputCostPerToken).toBe(9e-6)
+    expect(catalog.state().status).toBe('ready')
+  })
+})
+
+describe('a hung upstream must not hang the caller', () => {
+  it('gives up on a fetch that never settles', async () => {
+    const catalog = new PricingCatalog({
+      sources: [stubSource('hang', { m: 1e-6 })],
+      timeoutMs: 50,
+      fetch: (() => new Promise(() => {})) as unknown as typeof globalThis.fetch,
+      onWarn: () => {},
+    })
+    // `ensureLoaded()` is documented as safe on a per-request path.
+    const settled = await Promise.race([
+      catalog.ensureLoaded().then(() => 'settled'),
+      new Promise(resolve => setTimeout(resolve, 500, 'hung')),
+    ])
+    expect(settled).toBe('settled')
+    expect(catalog.getPrice('claude-opus-5')?.source).toBe('fallback')
+  })
+})
+
+describe('one bad row must not poison an aggregate', () => {
+  const rates = flatSchedule('m', 1e-6, 1e-7, 4e-6, undefined, 'fallback').periods[0]!.rates
+
+  it('treats a non-finite token count as zero', () => {
+    // A single NaN turns the whole summed total into NaN, which loses more
+    // than a wrong number would.
+    expect(costFromRates(rates, { inputTokens: Number.NaN, cachedInputTokens: 0, outputTokens: 0 })).toBe(0)
+    expect(costFromRates(rates, { inputTokens: 0, cachedInputTokens: 0, outputTokens: Number.POSITIVE_INFINITY })).toBe(0)
+    expect(costFromRates(rates, { inputTokens: undefined as unknown as number, cachedInputTokens: 0, outputTokens: 0 })).toBe(0)
+  })
+})
+
+describe('more shapes a stored model name comes in', () => {
+  it('strips a dash-separated release date', () => {
+    // `-20240229` is handled; `-2024-02-29` is the same thing with dashes,
+    // and is how OpenAI and Bedrock write it.
+    expect(pricingCandidates('o1-mini-2024-09-12')).toContain('o1-mini')
+    expect(pricingCandidates('claude-3-opus-2024-02-29')).toContain('claude-3-opus')
+  })
+
+  it('ignores a trailing slash', () => {
+    expect(pricingCandidates('anthropic/claude-opus-5/')).toContain('claude-opus-5')
+  })
+})
+
+describe('a window must describe a real interval', () => {
+  const catalog = new PricingCatalog({ sources: [] })
+  const tokens = { inputTokens: 1e6, cachedInputTokens: 0, outputTokens: 0 }
+  const day = [Date.UTC(2026, 8, 1), Date.UTC(2026, 8, 2)] as const
+
+  it('reads a reversed window as the interval it names', () => {
+    const forward = catalog.estimate({ model: 'deepseek-v4-flash', window: day, ...tokens })
+    const reversed = catalog.estimate({ model: 'deepseek-v4-flash', window: [day[1], day[0]], ...tokens })
+    expect(reversed.cost).toBeCloseTo(forward.cost, 10)
+  })
+
+  it('prices a zero-width window at that instant', () => {
+    const peak = Date.UTC(2026, 8, 1, 2)
+    const result = catalog.estimate({ model: 'deepseek-v4-flash', window: [peak, peak], ...tokens })
+    expect(result.basis).toBe('exact')
+    expect(result.cost).toBeCloseTo(catalog.estimate({ model: 'deepseek-v4-flash', at: peak, ...tokens }).cost, 10)
+  })
+})
+
+describe('a price anchor must be read in the documented unit', () => {
+  it('does not silently price a millisecond anchor at a far-future instant', () => {
+    const catalog = new PricingCatalog({ sources: [] })
+    // Before DeepSeek's peak schedule took effect, so reading the value as
+    // milliseconds lands in a different *period*, not merely a different
+    // hour — the error becomes visible instead of coincidentally invisible.
+    const seconds = Date.UTC(2026, 6, 1) / 1000
+    const asSeconds = catalog.estimateFromRow({ model: 'deepseek-v4-flash', input_tokens: 1e6, [PRICE_ANCHOR_COLUMN]: seconds })
+    const asMs = catalog.estimateFromRow({ model: 'deepseek-v4-flash', input_tokens: 1e6, [PRICE_ANCHOR_COLUMN]: seconds * 1000 })
+    expect(asSeconds.cost).toBeCloseTo(0.14, 10)
+    // An epoch-seconds value above 1e12 is the year 33658; it is a caller
+    // passing milliseconds, not a real timestamp.
+    expect(asMs.cost).toBeCloseTo(asSeconds.cost, 10)
+  })
+})
+
+describe('token counts arrive in whatever shape the driver used', () => {
+  const rates = flatSchedule('m', 1e-6, 1e-7, 4e-6, undefined, 'fallback').periods[0]!.rates
+
+  it('bills a bigint or a numeric string rather than reading it as zero', () => {
+    // node-postgres returns bigint columns as strings, and some drivers as
+    // BigInt. Both reach `costFromRates` directly when a caller builds the
+    // token counts itself.
+    expect(costFromRates(rates, { inputTokens: 1_000_000n as unknown as number, cachedInputTokens: 0, outputTokens: 0 })).toBeCloseTo(1, 10)
+    expect(costFromRates(rates, { inputTokens: '1000000' as unknown as number, cachedInputTokens: 0, outputTokens: 0 })).toBeCloseTo(1, 10)
   })
 })

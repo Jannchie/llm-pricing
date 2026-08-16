@@ -155,5 +155,15 @@ export function ratesFor(
   if (from === null && until === null) {
     return { rates: ratesAt(schedule, now), basis: 'exact' }
   }
-  return { rates: blendRates(schedule, from ?? Number.NEGATIVE_INFINITY, until ?? now), basis: 'blended' }
+  const begin = from ?? Number.NEGATIVE_INFINITY
+  const end = until ?? now
+  // A window is an interval, not an ordered pair of arguments. Reversed, it
+  // still names the same interval; zero-width, it names an instant and
+  // there is nothing to average.
+  if (begin === end) {
+    return { rates: ratesAt(schedule, begin), basis: 'exact' }
+  }
+  return begin > end
+    ? { rates: blendRates(schedule, end, begin), basis: 'blended' }
+    : { rates: blendRates(schedule, begin, end), basis: 'blended' }
 }

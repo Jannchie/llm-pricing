@@ -142,13 +142,21 @@ export function pricingCandidates(model: string): string[] {
   // `-MMDD` (`deepseek-v4-pro-0813`) and the moving `-latest`.
   // `add` is Set-backed, so re-adding an unchanged form is a no-op.
   const addAllForms = (form: string): void => {
-    for (const variant of [form, form.replace(/-(?:\d{4}|\d{6}|\d{8}|latest)$/, '')]) {
+    // `-YYYY-MM-DD` is the same release tag written with dashes, which is
+    // how OpenAI and Bedrock write it. Stripped first so the numeric rule
+    // below does not chew off only its last group.
+    const untagged = form
+      .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+      .replace(/-(?:\d{4}|\d{6}|\d{8}|latest)$/, '')
+    for (const variant of [form, untagged]) {
       add(variant)
       add(dotted(variant))
       add(undotted(variant))
     }
   }
-  const base = model.toLowerCase()
+  // A trailing slash makes the last path segment empty, so every
+  // segment-based candidate comes out blank.
+  const base = model.toLowerCase().trim().replace(/\/+$/, '')
   addAllForms(base)
   // Some Codex proxies stamp the reasoning effort into the model name
   // (`gpt-5.5(xhigh)`, `gpt-5.4 (high)`). The parenthetical is not part of
