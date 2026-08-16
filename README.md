@@ -98,6 +98,8 @@ const cache = { get: key => redis.get(key), set: (key, value) => redis.set(key, 
 
 Writes through `fileCache` are atomic, and a missing, unreadable or corrupt entry is treated as a miss. When the network is down and the cached copy has aged out, the stale copy is used anyway — last week's catalogue beats falling all the way back to the bundled archive — and `onWarn` fires.
 
+Being rescued that way is not success: `state().status` reports `stale` and the retry backoff engages, so a dead upstream is contacted once per `retryMs` rather than once per request. The same applies when one source of several fails — the models only it listed keep their prices from the previous load instead of vanishing.
+
 **Force a refresh** past the freshness window, the failure backoff and the cache:
 
 ```ts
@@ -114,6 +116,8 @@ Pass `at` when you know the instant the tokens were spent, `window` when the row
 catalog.estimate({ model: 'deepseek-v4-pro', at: '2026-09-01T02:00:00Z', ...tokens }) // basis: 'exact'
 catalog.estimate({ model: 'deepseek-v4-pro', window: [since, until], ...tokens }) // basis: 'blended'
 ```
+
+Passing neither prices at **now**, exactly as `getPriceFor(model)` does — saying nothing about time is not a request to average over all of it.
 
 `blended` weights each rate by how much wall-clock time the window spends under it — wrong for someone who only ever works during peak hours, but bounded by `[off-peak, peak]` and honest about the fact that the time axis was aggregated away before pricing.
 
@@ -179,7 +183,7 @@ They are there so the package can be extended, not so it can be used. **Their si
 
 ```bash
 pnpm install
-pnpm test        # 124 tests, no network
+pnpm test        # 144 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

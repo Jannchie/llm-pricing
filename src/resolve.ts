@@ -28,6 +28,19 @@ const VENDOR_PREFIX_BY_FAMILY: Array<{ test: (name: string) => boolean, prefix: 
   { test: n => n.startsWith('mistral-') || n.startsWith('codestral-'), prefix: 'mistralai/' },
 ]
 
+// Vendor names that themselves contain a dash, so that a `vendor-model`
+// string cannot be split on its first dash. Only these need listing: for
+// every single-segment vendor the generic first-dash strip already works.
+const DASHED_VENDOR_SEGMENTS = [
+  'x-ai',
+  'z-ai',
+  'meta-llama',
+  'zai-org',
+  'google-vertex',
+  'amazon-bedrock',
+  'azure-cognitive-services',
+]
+
 /**
  * `claude-opus-4-7` -> `claude-opus-4.7`. The lookahead keeps the regex from
  * chewing through 8-digit date suffixes.
@@ -94,6 +107,17 @@ export function pricingCandidates(model: string): string[] {
   const withoutLeadingSegment = base.slice(base.indexOf('-') + 1)
   if (base.includes('-') && withoutLeadingSegment) {
     addAllForms(withoutLeadingSegment)
+  }
+  // ...which is not enough when the vendor's own name contains a dash.
+  // `x-ai-grok-4` would strip to `ai-grok-4` and miss everything. Strip by
+  // known vendor name rather than by position. Stripping every leading
+  // segment in turn would also work, but it manufactures candidates like
+  // `4-5` out of `claude-opus-4-5`, and a junk key that happens to exist
+  // upstream prices the wrong model.
+  for (const vendor of DASHED_VENDOR_SEGMENTS) {
+    if (base.startsWith(`${vendor}-`)) {
+      addAllForms(base.slice(vendor.length + 1))
+    }
   }
   return [...set]
 }

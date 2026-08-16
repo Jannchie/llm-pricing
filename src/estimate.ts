@@ -63,11 +63,15 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
     ? explicitCacheRead
     : Math.max(0, tokens.cachedInputTokens - cacheCreation)
   const fresh = Math.max(0, tokens.inputTokens - cacheCreation - cacheRead)
+  // Clamped like every other count. A negative total is always a caller
+  // bug, but left alone it *subtracts* from the bill, so a single bad row
+  // silently discounts every aggregate it is summed into.
+  const output = Math.max(0, tokens.outputTokens)
   return fresh * rates.inputCostPerToken
     + creationDefaultRate * rates.cacheCreationInputCostPerToken
     + known1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
     + cacheRead * rates.cacheReadInputCostPerToken
     // outputTokens already includes reasoning; do not add
     // reasoningOutputTokens here.
-    + tokens.outputTokens * rates.outputCostPerToken
+    + output * rates.outputCostPerToken
 }

@@ -98,6 +98,15 @@ export function mergeLiveQuote(
     return live
   }
   const latest = archive.periods.at(-1)!
+  // A live catalogue publishes one number per model — no upstream has a
+  // field for a peak/off-peak day. Grafting that number over a period that
+  // prices by UTC hour would silently delete the peak rate and under-charge
+  // every peak hour from here on, so the archive keeps the model. This is
+  // the same reasoning that makes those schedules overrides in the first
+  // place; the live quote is not evidence about a schedule it cannot state.
+  if (latest.peak) {
+    return archive
+  }
   if (ratesEqual(latest.rates, live.periods.at(-1)!.rates)) {
     // The catalogue confirms what the archive already knew. Keep the
     // history, but credit the live source — it is what was consulted.

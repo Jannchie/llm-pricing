@@ -16,6 +16,18 @@ export interface OpenRouterModelsResponse {
  * those always contain a slash — and first-wins keeps a future duplicate
  * bare name from silently flipping an already-resolved price.
  */
+/**
+ * A quoted rate, or null when the field is absent/unparseable.
+ *
+ * `parseFloat(x) || fallback` cannot tell "free" from "missing", and a
+ * quoted $0 cache read is real — implicit caching is free on some vendors.
+ * Reading it as missing bills those reads at 10% of input.
+ */
+function num(value: unknown): number | null {
+  const parsed = Number.parseFloat(String(value ?? ''))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<string, PriceSchedule> {
   const map = new Map<string, PriceSchedule>()
   for (const model of json.data ?? []) {
@@ -37,8 +49,8 @@ export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<strin
     // cache_read rate for creation would under-charge cache creation by
     // ~12.5x. Fall back to cache_read when write is absent (most
     // OpenAI/DeepSeek entries have no input_cache_write).
-    const cacheRead = Number.parseFloat(String(pricing.input_cache_read ?? '')) || input * 0.1
-    const cacheWrite = Number.parseFloat(String(pricing.input_cache_write ?? '')) || cacheRead
+    const cacheRead = num(pricing.input_cache_read) ?? input * 0.1
+    const cacheWrite = num(pricing.input_cache_write) ?? cacheRead
     // OpenRouter is a point-in-time quote: one rate, valid now. It is
     // therefore always a single open-ended period.
     const schedule: PriceSchedule = {

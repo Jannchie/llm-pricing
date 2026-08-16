@@ -11,6 +11,9 @@ import path from 'node:path'
  * still bundles for workers and the browser.
  */
 
+/** Distinguishes concurrent writes to one key within a process. */
+let writes = 0
+
 /**
  * A catalogue cache backed by files on disk.
  *
@@ -36,7 +39,10 @@ export function fileCache(dir: string = path.join(tmpdir(), 'llm-pricing-cache')
     },
     async set(key, value) {
       const target = pathFor(key)
-      const temp = `${target}.${process.pid}.tmp`
+      // Unique per write, not just per process: two concurrent writes of
+      // the same key inside one process would otherwise interleave through
+      // a single temp file and rename a splice of both into place.
+      const temp = `${target}.${process.pid}.${(writes++).toString(36)}.tmp`
       try {
         await mkdir(dir, { recursive: true })
         await writeFile(temp, value, 'utf8')

@@ -202,13 +202,24 @@ export class PricingCatalog {
       if (this.failedAt !== 0 && now - this.failedAt < this.retryMs) {
         return Promise.resolve()
       }
+      this.inflight ??= this.track(this.load(false))
+      return this.inflight
     }
-    // A forced load still joins one already in flight rather than racing
-    // it — the in-flight one is by definition no older than this call.
-    this.inflight ??= this.load(options.force ?? false).finally(() => {
-      this.inflight = null
-    })
+    // A forced load cannot join one already in flight: that one may be
+    // serving from cache, which is precisely what `force` exists to
+    // bypass. Chain after it instead, so the two do not race for `remote`.
+    this.inflight = this.track((this.inflight ?? Promise.resolve()).then(async () => this.load(true)))
     return this.inflight
+  }
+
+  /** Hold a load as the in-flight one until it settles. */
+  private track(load: Promise<void>): Promise<void> {
+    const tracked = load.finally(() => {
+      if (this.inflight === tracked) {
+        this.inflight = null
+      }
+    })
+    return tracked
   }
 
   /**
@@ -225,7 +236,7 @@ export class PricingCatalog {
    * there. Returns the response body plus the time it was actually
    * retrieved from the network.
    */
-  private async fetchSource(source: PricingSource, force: boolean): Promise<{ body: string, fetchedAt: number }> {
+  private async fetchSource(source: PricingSource, force: boolean): Promise<{ body: string, fetchedAt: number, rescued?: boolean }> {
     const cached = this.cache ? decodeCacheEntry(await this.cache.get(source.url)) : null
     if (!force && cached && Date.now() - cached.fetchedAt < this.cacheTtlMs) {
       return cached
@@ -246,7 +257,10 @@ export class PricingCatalog {
       // machinery keeps history on its own rates either way.
       if (cached) {
         this.onWarn(`source "${source.name}" unreachable, using cached copy`, error)
-        return cached
+        // Flagged, because the upstream is down: without this the rescue
+        // reads as a successful load, `retryMs` never engages, and every
+        // request pays the dead upstream's timeout to be rescued again.
+        return { ...cached, rescued: true }
       }
       throw error
     }
@@ -257,23 +271,26 @@ export class PricingCatalog {
     const loaded: string[] = []
     // The freshness of the whole catalogue is that of its oldest part.
     let oldestFetchedAt = Number.POSITIVE_INFINITY
+    let rescued = false
     // Best source first: a later source only fills ids no earlier one had.
     for (const source of this.sources) {
       try {
-        const { body, fetchedAt } = await this.fetchSource(source, force)
-        const parsed = source.parse(JSON.parse(body))
+        const result = await this.fetchSource(source, force)
+        const parsed = source.parse(JSON.parse(result.body))
         for (const [key, schedule] of parsed) {
           if (!merged.has(key)) {
             merged.set(key, schedule)
           }
         }
         loaded.push(source.name)
-        oldestFetchedAt = Math.min(oldestFetchedAt, fetchedAt)
+        oldestFetchedAt = Math.min(oldestFetchedAt, result.fetchedAt)
+        rescued ||= result.rescued === true
       }
       catch (error) {
         this.onWarn(`source "${source.name}" failed to load`, error)
       }
     }
+    const complete = loaded.length === this.sources.length && !rescued
     if (loaded.length === 0) {
       // Keep serving whatever was already loaded; only the freshness label
       // degrades. With nothing loaded ever, we are on the fallback table.
@@ -283,10 +300,24 @@ export class PricingCatalog {
       this.loadedAt = Date.now()
     }
     else {
+      if (!complete) {
+        // One flaky source must not delete the models only it listed. They
+        // would fall through to the archive — or to nothing, priced at $0 —
+        // while `state()` still claimed the catalogue was ready. Carry the
+        // previous load's entries into the gaps; fresh data still wins.
+        for (const [key, schedule] of this.remote) {
+          if (!merged.has(key)) {
+            merged.set(key, schedule)
+          }
+        }
+      }
       this.remote = merged
-      this.status = 'ready'
+      this.status = complete ? 'ready' : 'stale'
       this.sourceName = loaded.join('+')
-      this.failedAt = 0
+      // A load that only got through on cached copies, or that lost a
+      // source, is a failure for backoff purposes even though it produced a
+      // usable catalogue.
+      this.failedAt = complete ? 0 : Date.now()
       // Dated by when the data was retrieved, not when it was read from
       // disk — otherwise reading a cache entry would reset the refresh
       // clock and the catalogue could never age out.

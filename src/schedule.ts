@@ -145,7 +145,15 @@ export function ratesFor(
   if (atMs !== null) {
     return { rates: ratesAt(schedule, atMs), basis: 'exact' }
   }
-  const begin = (window ? toMs(window[0]) : null) ?? Number.NEGATIVE_INFINITY
-  const end = (window ? toMs(window[1]) : null) ?? now
-  return { rates: blendRates(schedule, begin, end), basis: 'blended' }
+  const from = window ? toMs(window[0]) : null
+  const until = window ? toMs(window[1]) : null
+  // Saying nothing about time is not the same as asking for an unbounded
+  // window. A caller who supplied neither gets the rate in force now — the
+  // same answer `getPrice(model)` gives — instead of an average over the
+  // last 365 days, which under-charges any model whose price has since
+  // risen and made the two entry points disagree on the same row.
+  if (from === null && until === null) {
+    return { rates: ratesAt(schedule, now), basis: 'exact' }
+  }
+  return { rates: blendRates(schedule, from ?? Number.NEGATIVE_INFINITY, until ?? now), basis: 'blended' }
 }

@@ -74,7 +74,10 @@ describe('caching', () => {
     })
     await offline.ensureLoaded()
 
-    expect(offline.state().status).toBe('ready')
+    // Served, but honestly labelled: the copy answering these lookups is
+    // older than `cacheTtlMs` and the upstream is unreachable. Reporting
+    // `ready` would also suppress the retry backoff.
+    expect(offline.state().status).toBe('stale')
     expect(offline.getPrice('model-a')?.inputCostPerToken).toBe(1e-6)
     expect(warn).toHaveBeenCalledOnce()
   })

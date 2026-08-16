@@ -66,6 +66,11 @@ function isUsableCost(cost: ModelsDevCost | undefined): cost is ModelsDevCost {
   if (!Number.isFinite(input) || !Number.isFinite(output)) {
     return false
   }
+  // A negative rate is never a real quote, and it does not merely mis-price
+  // its own model: summed into a total it credits back other models' cost.
+  if (input < 0 || output < 0) {
+    return false
+  }
   // Placeholder rows: several aggregators list a model at 0/0 to advertise
   // availability. Pricing a real workload against those silently reports
   // $0 spend, which is worse than reporting nothing.
