@@ -1,5 +1,16 @@
 import type { PricingCatalog } from './catalog'
+import type { TokenCounts } from './estimate'
 import type { CostEstimate, TimeInput } from './types'
+
+/**
+ * How the producer of these rows nests its counts. Both default to the
+ * majority convention; see `TokenCounts` for why guessing is not safe.
+ *
+ * A store that merges several agents into one schema will need this per
+ * source rather than per query — the nesting travels with whoever wrote the
+ * row, not with the model.
+ */
+export type TokenShape = Pick<TokenCounts, 'inputIncludesCache' | 'reasoningIncludedInOutput'>
 
 /**
  * Column name carrying a row's pricing time anchor: the start of the UTC
@@ -86,6 +97,7 @@ export function estimateCostFromRow(
   row: Record<string, unknown>,
   window?: readonly [TimeInput, TimeInput],
   columns: RowColumns = DEFAULT_ROW_COLUMNS,
+  shape: TokenShape = {},
 ): CostEstimate {
   const anchor = row[columns.priceAnchor]
   const at = anchor === null || anchor === undefined
@@ -101,6 +113,7 @@ export function estimateCostFromRow(
     cacheReadInputTokens: rowNum(row[columns.cacheReadInputTokens]),
     outputTokens: rowNum(row[columns.outputTokens]),
     reasoningOutputTokens: rowNum(row[columns.reasoningOutputTokens]),
+    ...shape,
     at,
     window,
   })

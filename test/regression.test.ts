@@ -560,3 +560,24 @@ describe('an unvalidated schedule must not reach the pricing primitives', () => 
     expect(periodAt(gated, Date.now()).rates.inputCostPerToken).toBe(1e-6)
   })
 })
+
+describe('the row api must be able to say what shape the rows are', () => {
+  it('passes the nesting convention through to the estimate', () => {
+    // A store that merges several agents into one schema needs this per
+    // source: gemini rows carry reasoning beside output, claude rows do not,
+    // and both live in the same table.
+    const catalog = new PricingCatalog({ sources: [] })
+    const row = {
+      model: 'claude-opus-5',
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      output_tokens: 1000,
+      reasoning_output_tokens: 400,
+    }
+    const folded = catalog.estimateFromRow(row).cost
+    const beside = catalog.estimateFromRow(row, undefined, undefined, { reasoningIncludedInOutput: false }).cost
+    expect(beside / folded).toBeCloseTo(1.4, 9)
+  })
+})

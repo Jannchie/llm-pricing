@@ -44,13 +44,22 @@ export interface TokenCounts {
   cacheCreation1hInputTokens?: number
   cacheReadInputTokens?: number
   outputTokens: number
-  /**
-   * An informational subset of `outputTokens` — NOT added to the billed
-   * output. OpenAI/Codex already fold reasoning into `output_tokens`, and
-   * modern clients do the same for Gemini/OpenCode. Kept as a parameter so
-   * callers can keep passing it.
-   */
   reasoningOutputTokens?: number
+  /**
+   * Whether `reasoningOutputTokens` is already part of `outputTokens`.
+   * Defaults to `true`.
+   *
+   * The output-side twin of `inputIncludesCache`, and producer-dependent
+   * for the same reason. OpenAI and Anthropic fold reasoning into
+   * `output_tokens`, so billing it again double-charges. Gemini does not:
+   * `thoughtsTokenCount` sits beside `candidatesTokenCount` and inside
+   * `totalTokenCount`, and Google charges for it at the output rate — so
+   * ignoring it there drops real spend.
+   *
+   * Defaults to `true` because double-charging is the worse error, and
+   * because it is what the two largest producers do.
+   */
+  reasoningIncludedInOutput?: boolean
 }
 
 /**
@@ -107,12 +116,14 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
   const fresh = tokens.inputIncludesCache === false
     ? Math.max(0, input - Math.min(cached, input))
     : Math.max(0, input - cacheCreation - cacheRead)
+  // Gemini reports reasoning beside the output count rather than inside it,
+  // and Google bills it at the output rate — so for that producer it has to
+  // be added, not ignored.
   const output = count(tokens.outputTokens)
+    + (tokens.reasoningIncludedInOutput === false ? count(tokens.reasoningOutputTokens) : 0)
   return fresh * rates.inputCostPerToken
     + creationDefaultRate * rates.cacheCreationInputCostPerToken
     + known1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
     + cacheRead * rates.cacheReadInputCostPerToken
-    // outputTokens already includes reasoning; do not add
-    // reasoningOutputTokens here.
     + output * rates.outputCostPerToken
 }

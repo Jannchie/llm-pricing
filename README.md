@@ -156,7 +156,7 @@ Every top-level function is a one-line forward to a `PricingCatalog` method, so 
 | `pricingState()` | `.state()` | `{ status, loadedAt, source, size }` |
 | `getPriceFor(model, at?)` | `.getPrice(...)` | Resolve a model to a flat rate card |
 | `estimateCostUsd(args)` | `.estimate(...)` | Token counts → `{ cost, pricing, basis }` |
-| `estimateCostFromRow(row, window?, columns?)` | `.estimateFromRow(...)` | Same, from a snake_case SQL row |
+| `estimateCostFromRow(row, window?, columns?, shape?)` | `.estimateFromRow(...)` | Same, from a snake_case SQL row |
 | `timeSensitiveSqlPatterns()` | `.timeSensitiveSqlPatterns()` | LIKE patterns worth splitting by hour |
 
 Standalone, no catalogue involved:
@@ -181,13 +181,13 @@ The schedule primitives accept only a `NormalizedSchedule` — what `normalizeSc
 
 - **Long-context tiers are ignored.** models.dev publishes `context_over_200k` rates (often 2× list) and OpenAI charges them. Selecting between tiers needs the context length of each individual request, which aggregated usage rows no longer carry.
 - **Batch, priority and committed-throughput discounts are not modelled.**
-- **`reasoningOutputTokens` is informational.** Providers already fold reasoning into `output_tokens`; it is accepted and deliberately not billed twice.
+- **Reasoning nesting is producer-dependent.** OpenAI and Anthropic fold reasoning into `output_tokens`, so it is not billed twice. Gemini reports it beside the output count and charges for it — pass `reasoningIncludedInOutput: false` for those rows or the thinking tokens are dropped.
 
 ## Development
 
 ```bash
 pnpm install
-pnpm test        # 187 tests, no network
+pnpm test        # 190 tests, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
 pnpm build

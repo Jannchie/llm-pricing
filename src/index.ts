@@ -1,5 +1,5 @@
 import type { EstimateArgs, PricingCatalogOptions, PricingCatalogState } from './catalog'
-import type { RowColumns } from './row'
+import type { RowColumns, TokenShape } from './row'
 import type { CostEstimate, ModelPrice, TimeInput } from './types'
 import { PricingCatalog } from './catalog'
 
@@ -19,7 +19,7 @@ export { DEFAULT_PROVIDER_PRIORITY } from './catalog/modelsdev'
 export type { TokenCounts } from './estimate'
 export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates } from './estimate'
 export { pricingCandidates } from './resolve'
-export type { RowColumns } from './row'
+export type { RowColumns, TokenShape } from './row'
 export { DEFAULT_ROW_COLUMNS, PRICE_ANCHOR_COLUMN } from './row'
 export type { PricingSource } from './sources'
 export { modelsDevSource, openRouterSource } from './sources'
@@ -117,8 +117,9 @@ export function estimateCostFromRow(
   row: Record<string, unknown>,
   window?: readonly [TimeInput, TimeInput],
   columns?: RowColumns,
+  shape?: TokenShape,
 ): CostEstimate {
-  return getDefaultCatalog().estimateFromRow(row, window, columns)
+  return getDefaultCatalog().estimateFromRow(row, window, columns, shape)
 }
 
 /** See `PricingCatalog#timeSensitiveSqlPatterns`. */

@@ -206,3 +206,31 @@ describe('who decides whether input already contains the cache counts', () => {
     expect(wrong / costFromRates(RATES2, superset)).toBeGreaterThan(5)
   })
 })
+
+describe('whether reasoning is inside the output count', () => {
+  // Same class of problem as `inputIncludesCache`, on the output side.
+  //
+  // OpenAI and Anthropic fold reasoning into `output_tokens`, so billing it
+  // again would double-charge. Gemini does not: `thoughtsTokenCount` sits
+  // beside `candidatesTokenCount` and inside `totalTokenCount`, and Google
+  // bills it at the output rate. Measured in codetime's table, gemini's and
+  // hermes' `total - (input + output)` equals `sum(reasoning)` to the
+  // token, which is what a third sibling column looks like.
+  const R: Rates = {
+    inputCostPerToken: 0,
+    cacheCreationInputCostPerToken: 0,
+    cacheReadInputCostPerToken: 0,
+    cachedInputCostPerToken: 0,
+    outputCostPerToken: 1e-5,
+  }
+  const tokens = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 1000, reasoningOutputTokens: 400 }
+
+  it('does not bill reasoning twice by default', () => {
+    expect(costFromRates(R, tokens)).toBeCloseTo(1000 * 1e-5, 12)
+  })
+
+  it('bills reasoning that sits beside the output count', () => {
+    expect(costFromRates(R, { ...tokens, reasoningIncludedInOutput: false }))
+      .toBeCloseTo(1400 * 1e-5, 12)
+  })
+})
