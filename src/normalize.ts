@@ -1,5 +1,42 @@
 import type { NormalizedSchedule, PricePeriod, PriceSchedule } from './types'
 import { isTimeSensitive } from './schedule'
+import { RATE_KEYS } from './types'
+
+/**
+ * The first rate on this schedule that cannot be billed, or null.
+ *
+ * A rate has to be finite and non-negative to mean anything. Neither
+ * failure is hypothetical:
+ *
+ * - **Negative.** OpenRouter quotes `-1` on the meta-models it prices only
+ *   at request time (`openrouter/auto` and friends). A negative rate does
+ *   not merely mis-price its own model — summed into a total it credits
+ *   back every other model's cost, so one unpriceable id can carry a whole
+ *   account below zero. Both catalogue adapters now reject these at parse
+ *   time; this catches the same value arriving through `overrides` or
+ *   `fallback`, which are caller-supplied and not under this package's
+ *   control.
+ * - **NaN / Infinity.** One such rate propagates through every sum it
+ *   reaches, so a single bad card turns an entire aggregate into NaN —
+ *   which loses more than a wrong number would. `costFromRates` already
+ *   guards its token counts this way; rates deserve the same.
+ */
+function unbillableRate(schedule: PriceSchedule): string | null {
+  for (const period of schedule.periods) {
+    for (const rates of [period.rates, period.peak?.rates]) {
+      if (!rates) {
+        continue
+      }
+      for (const key of RATE_KEYS) {
+        const value = rates[key]
+        if (!Number.isFinite(value) || value < 0) {
+          return `${key}=${value}`
+        }
+      }
+    }
+  }
+  return null
+}
 
 /**
  * Bring a schedule to the shape the pricing primitives assume, or reject it.
@@ -18,6 +55,16 @@ export function normalizeSchedule(
   onWarn?: (message: string, error: unknown) => void,
   id?: string,
 ): NormalizedSchedule | null {
+  // Ahead of the fast path below, because a schedule that cannot be billed
+  // is exactly the shape that path returns untouched. Cost is one pass over
+  // at most a handful of rate cards, once per schedule at ingest — never
+  // per priced row.
+  const unbillable = unbillableRate(schedule)
+  if (unbillable !== null) {
+    onWarn?.(`schedule "${id ?? schedule.displayName ?? '?'}" quotes an unbillable rate (${unbillable}) and was dropped`, undefined)
+    return null
+  }
+
   // One period and no peak describes essentially every model in the
   // catalogue — nothing to sort and no window to check, so return the
   // schedule itself. Worth the branch: this runs over the whole bundled

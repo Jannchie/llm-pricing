@@ -17,6 +17,19 @@ describe('parseopenroutermodels', () => {
       },
       { id: 'broken/no-pricing' },
       { id: 'broken/unparseable', pricing: { prompt: 'free', completion: 'free' } },
+      // OpenRouter's real sentinel for "the router picks the endpoint, so
+      // there is no price yet" — quoted on openrouter/auto and four more.
+      { id: 'openrouter/auto', name: 'Auto Router', pricing: { prompt: '-1', completion: '-1' } },
+      // Free is not the same as unpriced: 19 of 413 live listings quote 0/0
+      // in earnest, so these have to survive where the sentinel does not.
+      { id: 'vendor/really-free:free', name: 'Really Free', pricing: { prompt: '0', completion: '0' } },
+      // A negative on a cache field alone must not discard an otherwise
+      // usable listing — it falls back the same way an absent field does.
+      {
+        id: 'vendor/bad-cache',
+        name: 'Bad Cache',
+        pricing: { prompt: '0.000001', completion: '0.000004', input_cache_read: '-1' },
+      },
     ],
   })
 
@@ -40,6 +53,28 @@ describe('parseopenroutermodels', () => {
   it('skips entries without usable pricing', () => {
     expect(table.has('no-pricing')).toBe(false)
     expect(table.has('unparseable')).toBe(false)
+  })
+
+  it('drops the negative sentinel rather than pricing it', () => {
+    // Read literally, -1 is a rate of minus one dollar per token: against a
+    // real store, 14 aggregated rows of this id summed to -$9,625,814 and
+    // pulled a $645k account total below zero. Dropping the id lets it fall
+    // through to the fallback table or stay honestly unpriced; clamping to
+    // 0 would resolve it to a free model, which shadows both.
+    expect(table.has('openrouter/auto')).toBe(false)
+    expect(table.has('auto')).toBe(false)
+  })
+
+  it('keeps a genuinely free listing', () => {
+    const rates = table.get('really-free:free')!.periods[0]!.rates
+    expect(rates.inputCostPerToken).toBe(0)
+    expect(rates.outputCostPerToken).toBe(0)
+  })
+
+  it('falls back on a negative cache rate without dropping the model', () => {
+    const rates = table.get('bad-cache')!.periods[0]!.rates
+    expect(rates.inputCostPerToken).toBe(1e-6)
+    expect(rates.cacheReadInputCostPerToken).toBeCloseTo(1e-7, 15)
   })
 })
 

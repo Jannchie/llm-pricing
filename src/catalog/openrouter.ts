@@ -17,15 +17,34 @@ export interface OpenRouterModelsResponse {
  * bare name from silently flipping an already-resolved price.
  */
 /**
- * A quoted rate, or null when the field is absent/unparseable.
+ * A quoted rate, or null when the field is absent, unparseable, or
+ * negative.
  *
  * `parseFloat(x) || fallback` cannot tell "free" from "missing", and a
- * quoted $0 cache read is real — implicit caching is free on some vendors.
- * Reading it as missing bills those reads at 10% of input.
+ * quoted $0 cache read is real — implicit caching is free on some vendors,
+ * and 19 of OpenRouter's 413 listings quote 0/0 in earnest (16 carry the
+ * `:free` suffix; the rest are `openrouter/free` and the Lyria models,
+ * which bill per second rather than per token). Reading those as missing
+ * bills their reads at 10% of input.
+ *
+ * A negative quote is neither free nor missing. OpenRouter uses `-1` as a
+ * sentinel on the meta-models whose endpoint — and therefore price — the
+ * router only picks at request time: `openrouter/auto`, `auto-beta`,
+ * `fusion`, `pareto-code`, `bodybuilder`. Taken literally that is a rate
+ * of minus one dollar per token, which does not merely mis-price its own
+ * model — summed into a total it credits back everything else. Measured
+ * against a real store, 14 aggregated rows of `openrouter/auto` came to
+ * -$9,625,814 and turned a $645k account total negative.
+ *
+ * `parseModelsDev` has rejected negative quotes since it was written (see
+ * `isUsableCost`); this adapter simply missed the same rule. It stops
+ * short of that one's 0/0 rejection on purpose — models.dev has real
+ * placeholder rows quoting 0/0 to advertise availability, and OpenRouter,
+ * as counted above, does not.
  */
 function num(value: unknown): number | null {
   const parsed = Number.parseFloat(String(value ?? ''))
-  return Number.isFinite(parsed) ? parsed : null
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }
 
 export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<string, PriceSchedule> {
@@ -39,9 +58,15 @@ export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<strin
     if (!pricing || typeof pricing !== 'object') {
       continue
     }
-    const input = Number.parseFloat(String(pricing.prompt ?? ''))
-    const output = Number.parseFloat(String(pricing.completion ?? ''))
-    if (!Number.isFinite(input) || !Number.isFinite(output)) {
+    // A listing whose own input/output rate is missing or negative has no
+    // usable quote at all. Drop the entry rather than clamping the rate to
+    // 0: an id that resolves to a free model is the same bug wearing a
+    // plausible number, and a resolved id shadows both the fallback table
+    // and every later source in the chain. Dropped ids fall through to
+    // those instead, or stay honestly unpriced and visible as such.
+    const input = num(pricing.prompt)
+    const output = num(pricing.completion)
+    if (input === null || output === null) {
       continue
     }
     // Read both cache-read and cache-write. They are distinct on Claude
