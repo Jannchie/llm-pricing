@@ -304,7 +304,11 @@ pnpm install
 pnpm test        # the whole suite, no network
 pnpm example     # runnable tour of every feature — examples/tour.ts
 pnpm sync        # append today's prices to src/catalog/snapshot.json
+pnpm check:live  # resolve real-world model strings against the live catalogue
+pnpm bench       # throughput of the pricing hot path
 pnpm build
 ```
+
+`pnpm bench` exists because a dozen decisions in `src/` are justified by cost per priced row, and nothing else checks them. Read its `resolution:` line first: it times the same work under two names, so whatever that comes out as is the run's noise floor, and a difference smaller than it is not a finding. On an ordinary laptop the floor is a few percent and the absolute numbers move by 2× between runs — only ratios within one run mean anything.
 
 [MIT](./LICENSE) · [GitHub](https://github.com/Jannchie/llm-pricing) · [npm](https://www.npmjs.com/package/llm-pricing)

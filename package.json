@@ -57,6 +57,7 @@
     "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build",
     "sync": "vite-node scripts/sync-snapshot.ts",
     "check:live": "vite-node scripts/check-live-prices.ts",
+    "bench": "vite-node scripts/bench.ts",
     "example": "vite-node examples/tour.ts"
   },
   "devDependencies": {
