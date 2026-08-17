@@ -1,7 +1,9 @@
 import type { ModelsDevResponse } from '../src/catalog/modelsdev'
+import type { RequestFacts } from '../src/schedule'
 import type { PriceSchedule, Rates } from '../src/types'
 import { describe, expect, it, vi } from 'vitest'
 import { PricingCatalog } from '../src/catalog'
+import { withDerivedContextTiers } from '../src/catalog/fallback'
 import { parseModelsDev, reasoningRatesFrom } from '../src/catalog/modelsdev'
 import { mergeSnapshot } from '../src/catalog/sync'
 import { usedReasoning } from '../src/estimate'
@@ -406,5 +408,89 @@ describe('the live catalogue', () => {
     expect(base?.outputCostPerToken).toBeCloseTo(1.2e-6, 12)
     expect(thinking?.outputCostPerToken).toBeCloseTo(4e-6, 12)
     expect(thinking?.inputCostPerToken).toBe(base?.inputCostPerToken)
+  })
+})
+
+/** qwen-plus's input and output rates per MTok, under the given facts. */
+function out(catalog: PricingCatalog, facts?: RequestFacts): [number, number] {
+  const card = catalog.getPrice('qwen-plus', undefined, facts)!
+  return [+(card.inputCostPerToken * 1e6).toFixed(3), +(card.outputCostPerToken * 1e6).toFixed(3)]
+}
+
+describe('the hand-maintained long-context tiers upstream omits', () => {
+  const catalog = new PricingCatalog({ sources: [] })
+  const facts = { promptTokens: 300_000 }
+
+  // Alibaba's published Singapore table for qwen-plus: $0.4/$1.2 up to 256K,
+  // $1.2/$3.6 above it, with thinking output going $4 -> $12. models.dev
+  // publishes no `cost.tiers` for any first-party Alibaba model.
+  it('prices all four of qwen-plus\'s published cards', () => {
+    expect(out(catalog)).toEqual([0.4, 1.2])
+    expect(out(catalog, facts)).toEqual([1.2, 3.6])
+    expect(out(catalog, { usedReasoning: true })).toEqual([0.4, 4])
+    expect(out(catalog, { ...facts, usedReasoning: true })).toEqual([1.2, 12])
+  })
+
+  it('reports the derived threshold like any other', () => {
+    expect(catalog.getPrice('qwen-plus', undefined, facts)?.contextTierAbove).toBe(256_000)
+    // Strictly greater than, same as an upstream-published tier.
+    expect(catalog.getPrice('qwen-plus', undefined, { promptTokens: 256_000 })?.contextTierAbove).toBeUndefined()
+  })
+
+  it('leaves a model with no entry untiered', () => {
+    expect(catalog.getPrice('qwen-turbo', undefined, { promptTokens: 900_000 })?.contextTierAbove).toBeUndefined()
+  })
+
+  it('steps aside where upstream publishes its own tiers', () => {
+    // The whole point of the "only if it has none" gate: gpt-5.5 keeps its
+    // 272k threshold from the archive rather than gaining a derived one.
+    expect(catalog.getPrice('gpt-5.5', undefined, facts)?.contextTierAbove).toBe(272_000)
+  })
+
+  it('does not apply when the schedule already prices by prompt size', () => {
+    // Directly, because the gate is the thing worth pinning: a schedule that
+    // carries a thinking card but no tiers must still receive one.
+    const withTier: PriceSchedule = {
+      displayName: 'Qwen Plus',
+      source: 'modelsdev',
+      periods: [{
+        from: Number.NEGATIVE_INFINITY,
+        rates: rates(0.4, 1.2, 0.04),
+        contextTiers: [{ abovePromptTokens: 999_000, rates: rates(1, 2) }],
+      }],
+    }
+    expect(withDerivedContextTiers('qwen-plus', withTier)).toBe(withTier)
+    expect(withDerivedContextTiers('qwen-plus', QWEN_PLUS)).not.toBe(QWEN_PLUS)
+    // An id with no entry is returned by identity, which is every other model.
+    expect(withDerivedContextTiers('claude-opus-5', QWEN_PLUS)).toBe(QWEN_PLUS)
+  })
+
+  it('scales each period from its own card, not from today\'s', () => {
+    const historic: PriceSchedule = {
+      displayName: 'Qwen Plus',
+      source: 'fallback',
+      sqlMatch: ['%qwen-plus%'],
+      periods: [
+        { from: Number.NEGATIVE_INFINITY, rates: rates(0.2, 0.6, 0.02) },
+        { from: Date.UTC(2026, 5, 1), rates: rates(0.4, 1.2, 0.04) },
+      ],
+    }
+    const derived = withDerivedContextTiers('qwen-plus', historic)
+    expect(derived.periods[0]!.contextTiers![0]!.rates.outputCostPerToken).toBeCloseTo(1.8e-6, 12)
+    expect(derived.periods[1]!.contextTiers![0]!.rates.outputCostPerToken).toBeCloseTo(3.6e-6, 12)
+  })
+
+  it('prices a 300k thinking request end to end', () => {
+    const { cost, low, high } = catalog.estimate({
+      model: 'qwen-plus',
+      inputTokens: 300_000,
+      cachedInputTokens: 0,
+      outputTokens: 5000,
+      reasoningOutputTokens: 3000,
+      perRequest: true,
+    })
+    expect(cost).toBeCloseTo(300_000 * 1.2e-6 + 5000 * 12e-6, 10)
+    expect(low).toBeCloseTo(cost, 12)
+    expect(high).toBeCloseTo(cost, 12)
   })
 })

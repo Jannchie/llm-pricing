@@ -1,5 +1,6 @@
 import type { ContextTier, PricePeriod, PriceSchedule, Rates } from '../types'
 import type { SnapshotEntry, SnapshotPeriod, SnapshotTier } from './sync'
+import { scaleRates } from '../rates'
 
 import snapshot from './snapshot.json'
 
@@ -113,6 +114,39 @@ const FAST_MULTIPLIERS: Array<[multiplier: number, baseIds: string[]]> = [
   ]],
 ]
 
+// Long-context tiers that no catalogue publishes, as a multiple of whatever
+// the model's own card resolves to.
+//
+// Alibaba is the gap this fills. Its published table puts `qwen-plus` on tiers
+// — above 256K a Singapore request pays $1.2/$3.6 against a $0.4/$1.2 list,
+// and $12 rather than $4 for thinking output — but models.dev publishes no
+// `cost.tiers` for any first-party Alibaba model, while resellers publish them
+// for the same models. First-party listings win the bare-name index, so
+// without this a 300k-token qwen-plus request prices at the short-request rate.
+//
+// Two deliberate choices, both the opposite of how an upstream-published tier
+// is handled:
+//
+//   - **A multiple, not a card.** `ContextTier` carries absolute rates because
+//     upstream ratios are not uniform. A hand-maintained entry has the reverse
+//     problem: absolute numbers would put every row of the model on a base
+//     price this file has to keep current, to fix the rare long request. Every
+//     rate in Alibaba's own table moves by exactly 3x at the boundary, so the
+//     multiple states the tier without owning the base — the same reasoning
+//     `FAST_MULTIPLIERS` applies.
+//   - **Only when the resolved schedule has none of its own.** The moment
+//     upstream publishes what it is missing, this table steps aside rather
+//     than overriding fresher data with an older assumption.
+//
+// Keyed by catalogue id, matched against the same candidates a lookup expands.
+const CONTEXT_TIER_MULTIPLIERS: Record<string, Array<[abovePromptTokens: number, multiplier: number]>> = {
+  // https://www.alibabacloud.com/help/zh/model-studio/model-pricing —
+  // Singapore. Beijing (`alibaba-cn`) tiers at 128K/256K/1M and does NOT move
+  // uniformly, so it is deliberately not expressed here; a bare `qwen-plus`
+  // resolves to the Singapore listing.
+  'qwen-plus': [[256_000, 3]],
+}
+
 /**
  * `<id>-fast` -> the base id and its multiplier.
  *
@@ -131,6 +165,37 @@ for (const [multiplier, baseIds] of FAST_MULTIPLIERS) {
   }
 }
 
-export { FALLBACK, FAST_BY_ID, FAST_MULTIPLIERS }
+/**
+ * Attach the hand-maintained long-context tiers for `id`, if there are any and
+ * the schedule does not already price by prompt size.
+ *
+ * Derived per period, so a model with price history gets a tier scaled from
+ * each era's own card rather than from today's — and returned by identity when
+ * there is nothing to add, which is every model but the handful listed above.
+ */
+export function withDerivedContextTiers(id: string, schedule: PriceSchedule): PriceSchedule {
+  const multipliers = CONTEXT_TIER_MULTIPLIERS[id]
+  // Tiers specifically, not `pricesByRequest`: qwen-plus carries a thinking
+  // card, so asking whether the schedule prices by *any* per-request dimension
+  // would answer yes and this table would never apply.
+  if (!multipliers || schedule.periods.some(period => period.contextTiers?.length)) {
+    return schedule
+  }
+  return {
+    ...schedule,
+    periods: schedule.periods.map(period => ({
+      ...period,
+      contextTiers: multipliers.map(([abovePromptTokens, multiplier]) => ({
+        abovePromptTokens,
+        rates: scaleRates(period.rates, multiplier),
+        // The thinking variant scales with everything else: Alibaba's own table
+        // takes thinking output from $4 to $12 across the same boundary.
+        reasoningRates: period.reasoningRates && scaleRates(period.reasoningRates, multiplier),
+      })),
+    })),
+  }
+}
+
+export { CONTEXT_TIER_MULTIPLIERS, FALLBACK, FAST_BY_ID, FAST_MULTIPLIERS }
 
 export { scaleSchedule } from '../rates'

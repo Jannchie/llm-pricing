@@ -7,7 +7,7 @@
 // internals need and can change in a minor release. Build on `llm-pricing`
 // itself unless you specifically need one of these.
 
-export { FALLBACK, FAST_BY_ID, FAST_MULTIPLIERS } from './catalog/fallback'
+export { CONTEXT_TIER_MULTIPLIERS, FALLBACK, FAST_BY_ID, FAST_MULTIPLIERS, withDerivedContextTiers } from './catalog/fallback'
 export type { ModelsDevResponse, ModelsDevTier } from './catalog/modelsdev'
 export { contextTiersFrom, DEFAULT_PROVIDER_PRIORITY, MODELS_DEV_URL, parseModelsDev, ratesFromCost, tierRatesFrom } from './catalog/modelsdev'
 export type { OpenRouterModelsResponse } from './catalog/openrouter'

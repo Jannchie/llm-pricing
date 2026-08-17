@@ -5,7 +5,7 @@ import type { RequestFacts, ResolvedRates } from './schedule'
 import type { PricingSource } from './sources'
 import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
-import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
+import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS, withDerivedContextTiers } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
 import { billedTokens, costFromBilled, promptOfBilled, totalOfBilled, usedReasoning } from './estimate'
 import { normalizeSchedule } from './normalize'
@@ -543,12 +543,25 @@ export class PricingCatalog {
         break
       }
     }
-    if (!live) {
-      return archived
+    // Long-context tiers no upstream publishes are attached last, to whatever
+    // the catalogue and archive settled on — and only when that has none of its
+    // own, so upstream publishing them takes precedence. Keyed by the candidate
+    // that resolved, so the entry follows the model rather than the spelling.
+    const resolved = live
+      // A live quote prices *now*, not the past. Graft it onto whatever
+      // history the archive has instead of letting one number cover all time.
+      ? mergeLiveQuote(archived, live, this.archiveObservedAt, archivedId ? [`%${archivedId}%`] : undefined)
+      : archived
+    if (!resolved) {
+      return null
     }
-    // A live quote prices *now*, not the past. Graft it onto whatever
-    // history the archive has instead of letting one number cover all time.
-    return mergeLiveQuote(archived, live, this.archiveObservedAt, archivedId ? [`%${archivedId}%`] : undefined)
+    for (const candidate of candidates) {
+      const derived = withDerivedContextTiers(candidate, resolved)
+      if (derived !== resolved) {
+        return derived
+      }
+    }
+    return resolved
   }
 
   /**
