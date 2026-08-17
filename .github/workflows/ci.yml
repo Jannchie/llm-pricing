@@ -1,0 +1,48 @@
+# Validate every push and pull request.
+#
+# `prepublishOnly` already gates the registry, but that only runs at release:
+# until this existed, a commit could sit on main for a week with a failing
+# test and nothing would say so. Lint is included because it is not part of
+# `prepublishOnly` and so had no gate at all.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      # The floor `package.json` declares, so a syntax or API level that
+      # needs newer fails here rather than in a user's runtime.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run typecheck
+
+      - run: pnpm run test
+
+      # `pnpm lint` is `eslint --fix`, which would report success after
+      # rewriting the tree. `--no-fix` is what actually asks a question.
+      - run: pnpm exec eslint . --no-fix
+
+      - run: pnpm run build
