@@ -107,10 +107,15 @@ const longPrompt = {
   cachedInputTokens: 0,
   outputTokens: 4000,
 }
+// The undeclared row is not merely cheaper — it reports the tier it could
+// not rule out as its upper bound, so the gap is visible rather than silent.
 for (const perRequest of [false, true]) {
-  const { cost, pricing } = offline.estimate({ ...longPrompt, perRequest })
+  const { cost, low, high, pricing } = offline.estimate({ ...longPrompt, perRequest })
   const tier = pricing?.contextTierAbove
-  console.log(`  perRequest: ${String(perRequest).padEnd(5)}  ${usd(cost)}  ${tier ? `> ${tier / 1000}k tier` : 'base card'}`)
+  console.log(
+    `  perRequest: ${String(perRequest).padEnd(5)}  ${usd(cost)}`
+    + `  [${usd(low)} – ${usd(high)}]  ${tier ? `> ${tier / 1000}k tier` : 'base card'}`,
+  )
 }
 
 // Output tokens are billed at the tier rate but never count toward crossing

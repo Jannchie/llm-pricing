@@ -3,14 +3,14 @@ import type { SnapshotModels } from '../src/catalog/sync'
 import type { ContextTier, PriceSchedule, Rates } from '../src/types'
 import { describe, expect, it, vi } from 'vitest'
 import { PricingCatalog } from '../src/catalog'
-import { contextTiersFrom, parseModelsDev } from '../src/catalog/modelsdev'
+import { contextTiersFrom, parseModelsDev, ratesFromCost } from '../src/catalog/modelsdev'
 import { mergeSnapshot } from '../src/catalog/sync'
 import { promptTokensBilled } from '../src/estimate'
 import { normalizeSchedule } from '../src/normalize'
 import { mergeLiveQuote, periodPricesEqual, scaleSchedule } from '../src/rates'
 import { contextTierFor, hasContextTiers, ratesFor } from '../src/schedule'
 import { sumEstimates } from '../src/total'
-import { DAY_MS } from '../src/types'
+import { DAY_MS, RATE_KEYS } from '../src/types'
 
 // $/MTok, converted at the boundary so the expectations below read in the
 // units the vendors publish.
@@ -166,6 +166,90 @@ describe('selecting a long-context tier', () => {
     expect(catalog.getPrice('gpt-5.5')?.inputCostPerToken).toBe(5e-6)
     expect(catalog.getPrice('gpt-5.5', undefined, 400_000)?.inputCostPerToken).toBe(10e-6)
     expect(catalog.getPrice('gpt-5.5', undefined, 400_000)?.contextTierAbove).toBe(272_000)
+  })
+})
+
+describe('what an undeclared row admits it does not know', () => {
+  const catalog = tiered()
+  const counts = { inputTokens: 400_000, cachedInputTokens: 0, outputTokens: 1000 }
+
+  it('bounds an aggregated row by the tier it could not rule out', () => {
+    // The defect this replaces: `low === high === cost` on the base card,
+    // which says "one card was possible" about a model where two are.
+    const { cost, low, high } = catalog.estimate({ model: 'gpt-5.5', ...counts })
+    expect(low).toBeCloseTo(cost, 12)
+    expect(high).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+    expect(high / cost).toBeCloseTo(1.99, 2)
+  })
+
+  it('closes the interval once the caller states the grain', () => {
+    for (const args of [{ perRequest: true }, { perRequest: true, promptTokens: 1000 }]) {
+      const { cost, low, high } = catalog.estimate({ model: 'gpt-5.5', ...counts, ...args })
+      expect(low).toBeCloseTo(cost, 12)
+      expect(high).toBeCloseTo(cost, 12)
+    }
+  })
+
+  it('leaves an untiered model exact', () => {
+    const flat = new PricingCatalog({ sources: [], overrides: {
+      m: { displayName: 'M', source: 'override', periods: [{ from: Number.NEGATIVE_INFINITY, rates: rates(5, 30) }] },
+    } })
+    const { cost, low, high } = flat.estimate({ model: 'm', ...counts })
+    expect(low).toBe(cost)
+    expect(high).toBe(cost)
+  })
+
+  // A model that both moved its price and prices by prompt size, so the two
+  // time paths (`at` and `window`) are reachable with tiers in play.
+  const changed = Date.UTC(2026, 5, 1)
+  const TIER = { abovePromptTokens: 272_000, rates: rates(10, 45, 1) }
+  const historic = new PricingCatalog({ sources: [], overrides: {
+    'gpt-5.5': {
+      displayName: 'GPT-5.5',
+      source: 'override',
+      sqlMatch: ['%gpt-5.5%'],
+      periods: [
+        { from: Number.NEGATIVE_INFINITY, rates: rates(5, 30, 0.5) },
+        { from: changed, rates: rates(5, 30, 0.5), contextTiers: [TIER] },
+      ],
+    },
+  } })
+
+  it('bounds an exact instant too, since knowing when says nothing about how long', () => {
+    const { cost, low, high, basis } = historic.estimate({ model: 'gpt-5.5', ...counts, at: changed + DAY_MS })
+    expect(basis).toBe('exact')
+    expect(low).toBeCloseTo(cost, 12)
+    expect(high).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+  })
+
+  it('claims nothing extra at an instant whose period has no tier', () => {
+    const { cost, low, high } = historic.estimate({ model: 'gpt-5.5', ...counts, at: changed - DAY_MS })
+    expect(low).toBe(cost)
+    expect(high).toBe(cost)
+  })
+
+  it('bounds a blend by the tiers of every period the window drew on', () => {
+    const { cost, low, high, basis } = historic.estimate({
+      model: 'gpt-5.5',
+      ...counts,
+      window: [changed - 30 * DAY_MS, changed + 30 * DAY_MS],
+    })
+    expect(basis).toBe('blended')
+    // The base rate never moved, so the blend itself is not what widens this.
+    expect(low).toBeCloseTo(cost, 12)
+    expect(high).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+  })
+
+  it('sums the interval across a mixed workload', () => {
+    const undeclared = catalog.estimate({ model: 'gpt-5.5', ...counts })
+    const declared = catalog.estimate({ model: 'gpt-5.5', ...counts, perRequest: true })
+    const total = sumEstimates([undeclared, declared])
+    // Both rows' floors are what they were costed at, so only the ceiling
+    // moves — the total is exact about the declared row and open about the
+    // other, which is the only honest reading of that pair.
+    expect(total.low).toBeCloseTo(total.cost, 10)
+    expect(total.high).toBeCloseTo(declared.cost * 2, 10)
+    expect(total.high).toBeGreaterThan(total.cost)
   })
 })
 
@@ -442,6 +526,66 @@ describe('parsing tiers from models.dev', () => {
     // a short one's. Compared loosely: the `input * 0.1` default drifts in
     // its last bits, which is why `closeEnough` exists.
     expect(tiers[0]!.rates.cacheReadInputCostPerToken).toBeCloseTo(1e-6, 12)
+  })
+
+  // The shape `openrouter`'s `google/gemini-2.5-pro` is published in, and 10
+  // other listings with it: the base quotes a cache-write rate and the tier
+  // does not. Defaulting to the tier's own cache_read made a long request's
+  // cache writes CHEAPER than a short one's, while its input doubled.
+  const partial = {
+    input: 1.25,
+    output: 10,
+    cache_read: 0.125,
+    cache_write: 0.375,
+    tiers: [{ input: 2.5, output: 15, cache_read: 0.25, tier: { type: 'context', size: 200_000 } }],
+  }
+
+  it('inherits a rate the tier omits from the base, scaled by the tier\'s input ratio', () => {
+    const tier = contextTiersFrom(partial, 1e6)![0]!
+    // 0.375 x (2.5 / 1.25), not the tier's own 0.25 cache_read.
+    expect(tier.rates.cacheCreationInputCostPerToken).toBeCloseTo(0.75e-6, 12)
+  })
+
+  it('never prices an inherited tier rate below the base card', () => {
+    const base = ratesFromCost(partial, 1e6)
+    const tier = contextTiersFrom(partial, 1e6)![0]!
+    for (const key of RATE_KEYS) {
+      expect(tier.rates[key]).toBeGreaterThanOrEqual(base[key])
+    }
+  })
+
+  it('never overrides a rate the tier states, even a cheaper one', () => {
+    // `llmgateway`'s grok-4-20 pair really does quote a tier cheaper on
+    // output. A quoted number is evidence; only a missing one is inferred.
+    const tier = contextTiersFrom({
+      input: 2,
+      output: 6,
+      cache_write: 4,
+      tiers: [{ input: 2.5, output: 5, cache_write: 1, tier: { type: 'context', size: 128_000 } }],
+    }, 1e6)![0]!
+    expect(tier.rates.outputCostPerToken).toBe(5e-6)
+    expect(tier.rates.cacheCreationInputCostPerToken).toBe(1e-6)
+  })
+
+  it('falls back to the generic default when the base has no ratio to scale by', () => {
+    const tier = contextTiersFrom({
+      input: 0,
+      output: 30,
+      cache_write: 4,
+      tiers: [{ input: 10, output: 45, tier: { type: 'context', size: 272_000 } }],
+    }, 1e6)![0]!
+    // A base input of 0 leaves no ratio, so scaling 4 by it would be
+    // arbitrary; the tier's own 10% default applies instead.
+    expect(tier.rates.cacheReadInputCostPerToken).toBeCloseTo(1e-6, 12)
+    expect(tier.rates.cacheCreationInputCostPerToken).toBeCloseTo(1e-6, 12)
+  })
+
+  it('archives a partially-quoted tier the same way the live index reads it', () => {
+    // The archive answers whenever the network is down, so a correction only
+    // the live path applied would be a rate that changes with connectivity.
+    const { models } = mergeSnapshot({}, payload(partial), ['openai'], '2026-08-17')
+    const [, periods] = models['gpt-5.5']!
+    expect(periods[0]![5]).toEqual([[200_000, 2.5, 0.75, 0.25, 15]])
   })
 })
 

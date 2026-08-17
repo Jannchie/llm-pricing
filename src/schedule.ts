@@ -121,6 +121,75 @@ function dailyWindowMsUpTo(x: number, startMs: number, lengthMs: number): number
 }
 
 /**
+ * The effective start of a blend window. An unbounded (all-time) one would
+ * give ancient rates unbounded weight; a year of lookback is enough for any
+ * live schedule.
+ */
+function blendStart(fromMs: number, toMs: number): number {
+  return Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
+}
+
+/**
+ * The periods a window draws on, each clipped to it.
+ *
+ * Shared by everything that reasons about a blend — the rate parts, the tier
+ * claim, the bound cards. Three independent walks of the same overlap
+ * arithmetic were three chances to disagree about which periods a window
+ * actually touched, and a disagreement there is silent: the blend would
+ * average one set of periods while the tier claim spoke for another.
+ */
+function weightedPeriods(
+  schedule: NormalizedSchedule,
+  startMs: number,
+  toMs: number,
+): Array<{ period: PricePeriod, from: number, to: number }> {
+  const out: Array<{ period: PricePeriod, from: number, to: number }> = []
+  const periods = schedule.periods
+  for (let i = 0; i < periods.length; i++) {
+    const period = periods[i]!
+    const next = periods[i + 1]
+    const from = Math.max(startMs, period.from)
+    const to = Math.min(toMs, next ? next.from : Number.POSITIVE_INFINITY)
+    if (to > from) {
+      out.push({ period, from, to })
+    }
+  }
+  return out
+}
+
+/**
+ * Bound cards for a period whose prompt length was never stated, memoised on
+ * the period.
+ *
+ * A row the caller has not declared per-request is priced at the base card,
+ * which is the right single number — a sum cannot say whether any request
+ * inside it crossed a threshold. But it is not a *certainty*, and reporting
+ * `low === high === base` claims one: on a tiered model the same counts can
+ * cost nearly twice as much. These are the cards those requests would have
+ * paid, so the estimate can state the interval instead of hiding it.
+ *
+ * Memoised because `ratesFor`'s flat path runs once per priced row while this
+ * array is a pure function of the period. Periods come from tables the
+ * catalogue holds for its lifetime, so a weak key is bounded by the
+ * catalogue rather than by traffic.
+ */
+const BOUNDS_BY_PERIOD = new WeakMap<PricePeriod, Rates[]>()
+
+function tierBounds(period: PricePeriod, promptTokens: number | undefined): Rates[] | undefined {
+  // A stated prompt length selects one card and rules the rest out; there is
+  // nothing left to bound.
+  if (promptTokens !== undefined || !period.contextTiers) {
+    return undefined
+  }
+  let bounds = BOUNDS_BY_PERIOD.get(period)
+  if (!bounds) {
+    bounds = [period.rates, ...period.contextTiers.map(tier => tier.rates)]
+    BOUNDS_BY_PERIOD.set(period, bounds)
+  }
+  return bounds
+}
+
+/**
  * Milliseconds of [from, to) that land inside a daily UTC peak window.
  *
  * O(windows) — differencing the two prefix sums beats walking the range a
@@ -149,25 +218,15 @@ export function blendParts(
   toMs: number,
   promptTokens?: number,
 ): Array<{ rates: Rates, weight: number }> {
-  // An unbounded (all-time) window would give ancient rates unbounded
-  // weight; a year of lookback is enough for any live schedule.
-  const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
+  const start = blendStart(fromMs, toMs)
   if (!(toMs > start)) {
     return [{ rates: ratesAt(schedule, start, promptTokens), weight: 1 }]
   }
   const parts: Array<{ rates: Rates, weight: number }> = []
-  const periods = schedule.periods
-  for (let i = 0; i < periods.length; i++) {
-    const period = periods[i]!
-    const next = periods[i + 1]
-    const segStart = Math.max(start, period.from)
-    const segEnd = Math.min(toMs, next ? next.from : Number.POSITIVE_INFINITY)
-    if (!(segEnd > segStart)) {
-      continue
-    }
-    const span = segEnd - segStart
+  for (const { period, from, to } of weightedPeriods(schedule, start, toMs)) {
+    const span = to - from
     if (period.peak) {
-      const peakMs = peakMsBetween(period.peak.windowsUtc, segStart, segEnd)
+      const peakMs = peakMsBetween(period.peak.windowsUtc, from, to)
       parts.push({ rates: period.peak.rates, weight: peakMs }, { rates: period.rates, weight: span - peakMs })
     }
     else {
@@ -204,9 +263,16 @@ export interface ResolvedRates {
   rates: Rates
   basis: PriceBasis
   /**
-   * The distinct cards a blend averaged — the material for a cost
-   * interval. Absent on every other path, which priced against exactly one
-   * card and has nothing to bound.
+   * The distinct cards this cost could have been charged at — the material
+   * for a cost interval, not a claim that any of them was applied.
+   *
+   * Two things put a card in here. A blend averaged it (the peak and
+   * off-peak ends of a window), or the caller left the prompt length
+   * unstated on a model that prices by it, so a long request inside the row
+   * would have paid a tier — see `tierBounds`.
+   *
+   * Absent when the resolution really did have exactly one possible card,
+   * which is nearly every row.
    */
   cards?: Rates[]
   /**
@@ -239,7 +305,9 @@ export function ratesFor(
     const tier = contextTierFor(period, promptTokens)
     return tier
       ? { rates: tier.rates, basis: 'flat', tierAbove: tier.abovePromptTokens }
-      : { rates: period.rates, basis: 'flat' }
+      // `cards` rather than nothing when the prompt length was never stated:
+      // the base card is the estimate, but a tier was not ruled out.
+      : { rates: period.rates, basis: 'flat', cards: tierBounds(period, promptTokens) }
   }
   const atMs = toMs(at)
   if (atMs !== null) {
@@ -267,23 +335,34 @@ export function ratesFor(
   // blending rather than duplicating the call.
   const [lo, hi] = begin > end ? [end, begin] : [begin, end]
   const parts = blendParts(schedule, lo, hi, promptTokens)
+  const segments = weightedPeriods(schedule, blendStart(lo, hi), hi)
   return {
     rates: weightedRates(parts),
     basis: 'blended',
-    // Zero-weight segments never influenced the average, so they must not
-    // widen the interval either — a period the window merely touches the
-    // boundary of is not a price this row could have paid.
-    cards: parts.filter(part => part.weight > 0).map(part => part.rates),
-    tierAbove: blendedTierAbove(schedule, lo, hi, promptTokens),
+    cards: [
+      // Zero-weight segments never influenced the average, so they must not
+      // widen the interval either — a period the window merely touches the
+      // boundary of is not a price this row could have paid.
+      ...parts.filter(part => part.weight > 0).map(part => part.rates),
+      // ...and, when the prompt length was never stated, the tiers of every
+      // period the window did draw on.
+      ...segments.flatMap(({ period }) => tierBounds(period, promptTokens)?.slice(1) ?? []),
+    ],
+    tierAbove: blendedTierAbove(segments, promptTokens),
   }
 }
 
 /** The one card in force at an instant, plus which tier produced it. */
 function exactAt(schedule: NormalizedSchedule, atMs: number, promptTokens: number | undefined): ResolvedRates {
+  const period = periodAt(schedule, atMs)
   return {
-    rates: ratesAt(schedule, atMs, promptTokens),
+    rates: cardFor(period, atMs, promptTokens),
     basis: 'exact',
-    tierAbove: contextTierFor(periodAt(schedule, atMs), promptTokens)?.abovePromptTokens,
+    tierAbove: contextTierFor(period, promptTokens)?.abovePromptTokens,
+    // Knowing *when* the tokens were spent says nothing about how long the
+    // prompt was, so an exact instant bounds its tiers exactly as a flat
+    // schedule does.
+    cards: tierBounds(period, promptTokens),
   }
 }
 
@@ -295,9 +374,7 @@ function exactAt(schedule: NormalizedSchedule, atMs: number, promptTokens: numbe
  * the tier there would name a rate the row did not pay.
  */
 function blendedTierAbove(
-  schedule: NormalizedSchedule,
-  fromMs: number,
-  toMs: number,
+  segments: Array<{ period: PricePeriod }>,
   promptTokens: number | undefined,
 ): number | undefined {
   if (promptTokens === undefined) {
@@ -305,16 +382,10 @@ function blendedTierAbove(
   }
   let common: number | undefined
   let first = true
-  const periods = schedule.periods
-  // The same lookback `blendParts` applies, so the two agree on which
-  // periods carried weight — a period it gave none cannot veto the tier.
-  const start = Number.isFinite(fromMs) ? fromMs : toMs - 365 * DAY_MS
-  for (let i = 0; i < periods.length; i++) {
-    const period = periods[i]!
-    const next = periods[i + 1]
-    if (!(Math.min(toMs, next ? next.from : Number.POSITIVE_INFINITY) > Math.max(start, period.from))) {
-      continue
-    }
+  // Reads the segments `blendParts` weighted, so the two cannot disagree
+  // about which periods carried weight — a period given none cannot veto
+  // the tier.
+  for (const { period } of segments) {
     const tier = contextTierFor(period, promptTokens)?.abovePromptTokens
     if (first) {
       common = tier

@@ -202,18 +202,25 @@ export interface CostEstimate {
   pricing: ModelPrice | null
   basis: PriceBasis
   /**
-   * What this row could have cost, at the cheapest and dearest rate card
-   * the estimate drew on.
+   * What this row could have cost, at the cheapest and dearest rate card the
+   * estimate could not rule out.
    *
-   * Equal to `cost` for `flat` and `exact` — there was only ever one card.
-   * For `blended` they are the off-peak and peak ends of the window, which
-   * for DeepSeek is a factor of two apart. `basis: 'blended'` says the
-   * number is approximate; these say by how much, and they cost nothing to
-   * produce because both cards were already in hand.
+   * Two things separate them from `cost`:
    *
-   * Sound because cost is linear in the rates: blending averages the cards,
-   * so the blended cost is exactly the same average of their costs and can
-   * never fall outside them.
+   * - **A blend.** They are the off-peak and peak ends of the window, which
+   *   for DeepSeek is a factor of two apart. `basis: 'blended'` says the
+   *   number is approximate; these say by how much.
+   * - **An unstated prompt length on a model that prices by it.** The row is
+   *   costed at the base card, because a sum cannot say whether any request
+   *   inside it crossed a long-context threshold — but it may have, and
+   *   `high` is what that would have cost. Pass `perRequest` and the interval
+   *   closes to a point. Note this applies at `basis: 'flat'` too: the
+   *   uncertainty is about prompt size, not about time.
+   *
+   * Equal to `cost` whenever exactly one card was possible, which is nearly
+   * every row. Sound because cost is linear in the rates: blending averages
+   * the cards, so the blended cost is the same average of their costs and
+   * cannot fall outside them.
    */
   low: number
   high: number

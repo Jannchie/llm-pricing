@@ -683,9 +683,12 @@ export class PricingCatalog {
     }
     const { rates, basis, cards, tierAbove } = this.ratesForMemo(schedule, args, this.promptTokensFor(args))
     const cost = costFromRates(rates, args)
-    // Cost is linear in the rates, so the blend's cost is the same weighted
-    // average of the cards' costs — it cannot fall outside them, and these
-    // are reachable prices rather than a nominal error bar.
+    // Every card this row could have been charged at, priced against the same
+    // counts: the ends of a blend, and any long-context tier the caller did
+    // not rule out. These are reachable prices rather than a nominal error
+    // bar — and for a blend the bound is tight, because cost is linear in the
+    // rates, so the blended cost is the same weighted average of the cards'
+    // costs and cannot fall outside them.
     let low = cost
     let high = cost
     if (cards) {

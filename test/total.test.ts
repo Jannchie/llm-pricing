@@ -184,6 +184,12 @@ describe('sumestimates', () => {
     const total = sumEstimates([
       mine,
       other.estimate({ model: 'claude-opus-5', ...MTOK }),
+      // Not `structuredClone`, which the lint rule would prefer: JSON is the
+      // boundary this reproduces, and only JSON *drops* the keys whose value
+      // is `undefined`. A round-tripped card has no `contextTierAbove` field
+      // at all where the original has one holding `undefined`, and grouping
+      // has to put the two together anyway.
+      // eslint-disable-next-line unicorn/prefer-structured-clone
       JSON.parse(JSON.stringify(mine)) as typeof mine,
     ])
     expect(total.cards).toHaveLength(1)

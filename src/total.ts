@@ -20,7 +20,9 @@ export interface CostTotal {
   cost: number
   /**
    * The interval the true cost lies in, summed from each estimate's own
-   * bounds. Equal to `cost` unless something in the sum was blended.
+   * bounds. Equal to `cost` unless something in the sum was blended across a
+   * price change, or priced on a long-context model without `perRequest` —
+   * see `CostEstimate.low`.
    */
   low: number
   high: number

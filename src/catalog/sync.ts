@@ -1,6 +1,6 @@
 import type { ModelsDevCost, ModelsDevResponse } from './modelsdev'
 import { closeEnough } from '../rates'
-import { cacheRatesFrom, isUsableCost } from './modelsdev'
+import { cacheRatesFrom, contextTiersFrom, isUsableCost } from './modelsdev'
 
 /**
  * The merge behind `pnpm sync`, separated from the script so it can be
@@ -68,19 +68,18 @@ function sameRates(a: readonly number[], b: readonly number[]): boolean {
  */
 function archivedRates(cost: ModelsDevCost): { base: [number, number, number, number], tiers: SnapshotTier[] } {
   const { cacheRead, cacheWrite } = cacheRatesFrom(cost, 1)
-  const tiers: SnapshotTier[] = []
-  for (const tier of cost.tiers ?? []) {
-    const size = tier.tier?.size
-    if (tier.tier?.type !== 'context' || typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
-      continue
-    }
-    if (!isUsableCost(tier)) {
-      continue
-    }
-    const tierCache = cacheRatesFrom(tier, 1)
-    tiers.push([size, tier.input!, tierCache.cacheWrite, tierCache.cacheRead, tier.output!])
-  }
-  tiers.sort((a, b) => a[0] - b[0])
+  // Read through the same function the live index uses, rather than a second
+  // copy of the same filtering and defaulting. The two had already drifted
+  // once by construction: a rule that only the live path applied would let a
+  // quote it corrects be archived uncorrected, and then the archive is what
+  // answers whenever the network is down.
+  const tiers = (contextTiersFrom(cost, 1) ?? []).map(({ abovePromptTokens, rates }): SnapshotTier => [
+    abovePromptTokens,
+    rates.inputCostPerToken,
+    rates.cacheCreationInputCostPerToken,
+    rates.cacheReadInputCostPerToken,
+    rates.outputCostPerToken,
+  ])
   return { base: [cost.input!, cacheWrite, cacheRead, cost.output!], tiers }
 }
 

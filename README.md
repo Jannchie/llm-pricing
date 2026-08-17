@@ -153,7 +153,14 @@ The threshold is measured on the prompt — fresh input plus cache reads plus ca
 
 Which card was applied is visible rather than folded away: `pricing.contextTierAbove` carries the threshold, and `sumEstimates` keys on it, so a workload whose long requests crossed a threshold reports two entries in `total.cards` instead of one averaged rate.
 
-Leaving `perRequest` off keeps an aggregated row on the base card, which undercharges the rare long request rather than overcharging every short one.
+Leaving `perRequest` off keeps an aggregated row on the base card, which undercharges the rare long request rather than overcharging every short one — **and says so**. `cost` is the base-card figure, while `high` is what the same counts would come to at the dearest tier the row cannot rule out:
+
+```ts
+const { cost, low, high } = estimateCostUsd({ model: 'gpt-5.5', inputTokens: 3e6, cachedInputTokens: 0, outputTokens: 2e5 })
+// cost $21.00, low $21.00, high $39.00 — "at least $21, and up to $39 if these were long requests"
+```
+
+Declaring the grain closes the interval to a point, so `high / cost` on a total is a direct measure of how much a store would gain by passing `perRequest`.
 
 **Tiers are historical too.** Anthropic's own >200k premium — $6/$22.50 on Sonnet 4/4.5 against a $3/$15 list — existed until 2026-03-13 and was then withdrawn; every current first-party Claude model prices the full 1M window flat. That is why a tier lives inside a `PricePeriod` rather than beside the schedule: a model has to be able to carry one for its old periods and none for its new ones. The archive backfilled the tiers it learned about into their existing periods rather than dating them at the sync, since those rates were in force before this package recorded them — a one-time migration, after which a newly-appearing tier reads as a vendor introducing a premium and gets its own period.
 
@@ -254,15 +261,16 @@ total.byBasis.blended // the share an hour-grouped query would sharpen
 total.cards // every rate that contributed, with how much each did
 ```
 
-`low`/`high` are on each estimate too, and are real prices rather than an error bar: cost is linear in the rates, so a blend's cost is the same weighted average of its cards' costs and can never fall outside them. For a flat or exact estimate all three are equal, so a total only shows a range when something in it genuinely has one.
+`low`/`high` are on each estimate too, and are real prices rather than an error bar — every one of them is a card the row could actually have been charged at. Two things open the interval: a blend across a price change or a peak boundary, and an undeclared prompt length on a model that prices by one. Everything else has all three equal, so a total only shows a range when something in it genuinely has one.
 
 `unpriced` is the counterweight to `cost: 0`. An unknown model contributes nothing to the total and the total still looks complete; this is how much usage that zero is standing in for.
 
 ## Known limits
 
-- **Long-context tiers need `perRequest`.** They are modelled and priced (see [Long-context tiers](#long-context-tiers)), but only for rows the caller declares to be a single request. An aggregated row cannot say whether any individual request crossed a threshold, so it stays on the base card and undercharges the long ones.
+- **Long-context tiers need `perRequest`.** They are modelled and priced (see [Long-context tiers](#long-context-tiers)), but only for rows the caller declares to be a single request. An aggregated row cannot say whether any individual request crossed a threshold, so it stays on the base card — and reports `high` as what the tier would have cost, rather than claiming the base rate was certainly charged.
 - **A withdrawn tier is only archived from the day it was noticed.** Anthropic's pre-2026-03-13 >200k premium on Sonnet 4/4.5 is not in the archive: upstream publishes today's prices, and when a premium is withdrawn the tier disappears from the feed along with its history. Pricing those rows correctly needs a hand-written override with the right effective window.
-- **Batch, priority and committed-throughput discounts are not modelled.** Nor is the 1.1× `inference_geo: "us"` / regional-endpoint multiplier.
+- **A separate reasoning-token rate is not applied.** models.dev publishes `cost.reasoning` on 143 models, 41 of which quote it differently from output — but not with one meaning. On Alibaba's 9 first-party thinking models it is the *output* rate for a request that used thinking (qwen-plus: $1.2/MTok plain, $4 thinking), so it applies to every output token of such a request; on Perplexity's `sonar-deep-research` it is cheaper than output and reads as a per-reasoning-token rate. Billing either reading would be wrong for the other, so reasoning is billed at the output rate, which undercharges Alibaba's thinking traffic by up to 3.3× on the output side. Modelling it properly needs a per-request "reasoning mode" card, the same shape as a context tier.
+- **Batch, priority and committed-throughput discounts are not modelled.** Nor is the 1.1× `inference_geo: "us"` / regional-endpoint multiplier. Upstream has no price for any of them: models.dev's `service_tier: "priority"` appears only as a request-body hint under `experimental.modes`, with no rate attached, which is why the fast/priority multipliers are hand-maintained (see [What stays hand-maintained](#what-stays-hand-maintained-and-why)).
 - **A blend weights by wall-clock time, not by usage.** Rows summed over a window no longer say which hours their tokens were spent in, so `blended` assumes they were spread evenly. Measured against a real store's DeepSeek traffic, 27.45% of tokens landed in peak hours against the 29.17% a uniform day implies — a 1.35% overstatement there, but the bound is the full [off-peak, peak] interval, which `low`/`high` now report rather than leave implicit. Group by UTC hour to remove the assumption entirely.
 - **Token nesting cannot be inferred from the model.** Which counts contain which is a property of the producer, and for reasoning not even a constant one. `inferShape` recovers the output side from a row's own total; the input side is genuinely unrecoverable and has to be declared. See [Token shapes](#token-shapes).
 

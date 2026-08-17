@@ -1,6 +1,6 @@
 import type { PricingCache } from './cache'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -51,6 +51,12 @@ export function fileCache(dir: string = path.join(tmpdir(), 'llm-pricing-cache')
       catch {
         // A cache that cannot be written is not an error — the catalogue
         // has the network and then the bundled archive behind it.
+        //
+        // The temp file is another matter: a `rename` that fails after the
+        // write succeeded leaves a full copy of a ~4 MB catalogue behind, in
+        // a directory nothing else prunes, once per attempt. Swallow the
+        // unlink too — it fails precisely when there was nothing to remove.
+        await unlink(temp).catch(() => {})
       }
     },
   }

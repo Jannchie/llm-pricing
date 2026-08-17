@@ -128,6 +128,48 @@ export function ratesFromCost(cost: ModelsDevCost, divisor: number): Rates {
 }
 
 /**
+ * The rates a long-context tier implies — the tier's own numbers where it
+ * publishes them, and otherwise the base card's, scaled by how much the tier
+ * moved input.
+ *
+ * A tier is a *variant* of the base card, not an independent quote, and the
+ * generic defaults get that badly wrong when a tier is quoted partially.
+ * `openrouter`'s `google/gemini-2.5-pro` publishes `cache_write: 0.375` on the
+ * base and omits it on the >200k tier; `cacheRatesFrom` would then fall back
+ * to the tier's own `cache_read` of 0.25 and bill long requests' cache writes
+ * BELOW the base rate, while their input doubled. 11 listings upstream are
+ * shaped that way.
+ *
+ * Scaling by the input ratio is the assumption these vendors actually
+ * publish — every fully-quoted tier upstream moves its cache rates in step
+ * with input — and it can only ever be applied to a number the tier did not
+ * state, so an explicit upstream rate is never overridden. That matters for
+ * the two listings whose tier is genuinely *cheaper* in one dimension
+ * (`llmgateway`'s grok-4-20 pair): those numbers are quoted, so they stand.
+ */
+export function tierRatesFrom(base: ModelsDevCost, tier: ModelsDevTier, divisor: number): Rates {
+  const input = tier.input! / divisor
+  // A base input of 0 leaves no ratio to scale by; fall through to the
+  // generic defaults rather than inventing one.
+  const ratio = typeof base.input === 'number' && base.input > 0 ? tier.input! / base.input : null
+  const inherited = (own: number | undefined, from: number | undefined): number | null => {
+    if (typeof own === 'number' && Number.isFinite(own)) {
+      return own / divisor
+    }
+    return ratio !== null && typeof from === 'number' && Number.isFinite(from) ? (from * ratio) / divisor : null
+  }
+  const cacheRead = inherited(tier.cache_read, base.cache_read) ?? input * 0.1
+  const cacheWrite = inherited(tier.cache_write, base.cache_write) ?? cacheRead
+  return {
+    inputCostPerToken: input,
+    cacheCreationInputCostPerToken: cacheWrite,
+    cacheReadInputCostPerToken: cacheRead,
+    cachedInputCostPerToken: cacheRead,
+    outputCostPerToken: tier.output! / divisor,
+  }
+}
+
+/**
  * The long-context tiers a models.dev cost block declares, ascending.
  *
  * Only `type: 'context'` is read. A tier's threshold is a **prompt** length,
@@ -138,6 +180,9 @@ export function ratesFromCost(cost: ModelsDevCost, divisor: number): Rates {
  * Each tier must pass `isUsableCost` in its own right. That matters more
  * here than for a base quote: a tier quoting 0/0 would make every request
  * above the threshold free, turning the dearest requests into the cheapest.
+ *
+ * Rates a tier leaves out are inherited from `cost` rather than defaulted
+ * generically — see `tierRatesFrom`.
  */
 export function contextTiersFrom(cost: ModelsDevCost, divisor: number): ContextTier[] | undefined {
   const tiers: ContextTier[] = []
@@ -149,7 +194,7 @@ export function contextTiersFrom(cost: ModelsDevCost, divisor: number): ContextT
     if (!isUsableCost(tier)) {
       continue
     }
-    tiers.push({ abovePromptTokens: size, rates: ratesFromCost(tier, divisor) })
+    tiers.push({ abovePromptTokens: size, rates: tierRatesFrom(cost, tier, divisor) })
   }
   if (tiers.length === 0) {
     return undefined
