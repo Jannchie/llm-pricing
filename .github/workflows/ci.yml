@@ -19,8 +19,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  # The library's own work, on both the floor `package.json` declares and a
+  # current release — so a syntax or API level that needs newer fails here
+  # rather than in a consumer's runtime.
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 24]
     steps:
       - uses: actions/checkout@v7
 
@@ -28,11 +35,9 @@ jobs:
         with:
           version: 10
 
-      # The floor `package.json` declares, so a syntax or API level that
-      # needs newer fails here rather than in a user's runtime.
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -41,8 +46,29 @@ jobs:
 
       - run: pnpm run test
 
+      - run: pnpm run build
+
+  # Separate, and deliberately NOT on the floor: the shared eslint config
+  # reaches `Object.groupBy`, which needs Node 21+. That is a constraint on
+  # this repo's dev toolchain, not on the library — consumers never run it —
+  # so pinning lint to the declared floor only fails the build for a reason
+  # no user can encounter.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
       # `pnpm lint` is `eslint --fix`, which would report success after
       # rewriting the tree. `--no-fix` is what actually asks a question.
       - run: pnpm exec eslint . --no-fix
-
-      - run: pnpm run build
