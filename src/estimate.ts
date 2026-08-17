@@ -89,10 +89,10 @@ function count(value: unknown): number {
  *
  * Exported (module-internally: not part of the package's public API) because
  * a single row needs this same struct several times over — for its cost, for
- * its billed total, for the prompt length a tier is selected against, and
- * once more for each card a cost interval is bounded by. Deriving it once and
- * passing it down is worth ~3x on the hot path over letting each of those
- * recompute it from the raw counts.
+ * its billed total, for the prompt length a tier is selected against, and once
+ * more for each card a cost interval is bounded by. Deriving it once and
+ * passing it down replaces three to five reductions of the same counts with
+ * one; `estimate` is the only caller that has them all in hand.
  */
 export interface BilledTokens {
   fresh: number
@@ -195,6 +195,21 @@ export function promptTokensBilled(tokens: TokenCounts): number {
 /** `promptTokensBilled` for counts that have already been reduced. */
 export function promptOfBilled(b: BilledTokens): number {
   return b.fresh + b.creationDefault + b.creation1h + b.cacheRead
+}
+
+/**
+ * Whether these counts describe a request that used thinking.
+ *
+ * Any reasoning tokens at all is the signal, whichever side of
+ * `reasoningIncludedInOutput` the producer reports them on — the question is
+ * whether the request reasoned, not how many tokens it spent doing so.
+ *
+ * A producer that does not report reasoning tokens leaves this false, so such
+ * a request pays the base card. That undercharges rather than overcharges, and
+ * it is the same trade `perRequest` makes: no counts, no claim.
+ */
+export function usedReasoning(tokens: TokenCounts): boolean {
+  return count(tokens.reasoningOutputTokens) > 0
 }
 
 /**

@@ -23,7 +23,12 @@ import { RATE_KEYS } from './types'
  */
 function unbillableRate(schedule: PriceSchedule): string | null {
   for (const period of schedule.periods) {
-    for (const rates of [period.rates, period.peak?.rates, ...(period.contextTiers ?? []).map(tier => tier.rates)]) {
+    const cards = [period, ...(period.contextTiers ?? [])]
+    for (const rates of [
+      ...cards.map(card => card.rates),
+      ...cards.map(card => card.reasoningRates),
+      period.peak?.rates,
+    ]) {
       if (!rates) {
         continue
       }

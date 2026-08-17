@@ -69,11 +69,12 @@ const EMPTY: CostTotal = {
  * and `cards` is read to answer "what was this charged at".
  */
 function cardKey(pricing: ModelPrice): string {
-  // The tier is part of the identity, not a decoration: "the base rate" and
-  // "the rate above 272k" are two different facts about the same model, and
-  // a caller reading `cards` to answer "what was this charged at" needs them
-  // apart even in the corner case where a tier happens to quote equal rates.
-  let key = `${pricing.source}|${pricing.providerId ?? ''}|${pricing.displayName ?? ''}|${pricing.contextTierAbove ?? ''}`
+  // The tier and the thinking variant are part of the identity, not
+  // decorations: "the base rate", "the rate above 272k" and "the rate in
+  // thinking mode" are three different facts about the same model, and a
+  // caller reading `cards` to answer "what was this charged at" needs them
+  // apart even in the corner case where two of them quote equal rates.
+  let key = `${pricing.source}|${pricing.providerId ?? ''}|${pricing.displayName ?? ''}|${pricing.contextTierAbove ?? ''}|${pricing.reasoningMode ?? ''}`
   for (const rate of RATE_KEYS) {
     key += `|${pricing[rate]}`
   }

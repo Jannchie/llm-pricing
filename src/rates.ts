@@ -1,4 +1,4 @@
-import type { PricePeriod, PriceSchedule, Rates } from './types'
+import type { PricePeriod, PriceSchedule, RateCard, Rates } from './types'
 import { RATE_KEYS } from './types'
 
 export function scaleRates(rates: Rates, multiplier: number): Rates {
@@ -88,13 +88,30 @@ export function ratesEqual(a: Rates, b: Rates): boolean {
  * refuses to touch a peak schedule at all, so it never gets this far.
  */
 export function periodPricesEqual(a: PricePeriod, b: PricePeriod): boolean {
-  if (!ratesEqual(a.rates, b.rates)) {
+  if (!cardsEqual(a, b)) {
     return false
   }
   const at = a.contextTiers ?? []
   const bt = b.contextTiers ?? []
   return at.length === bt.length
-    && at.every((tier, i) => tier.abovePromptTokens === bt[i]!.abovePromptTokens && ratesEqual(tier.rates, bt[i]!.rates))
+    && at.every((tier, i) => tier.abovePromptTokens === bt[i]!.abovePromptTokens && cardsEqual(tier, bt[i]!))
+}
+
+/**
+ * Whether two cards quote the same price, thinking-mode variant included.
+ *
+ * The variant has to be compared for the same reason the tiers do: a model
+ * whose base output rate holds steady while its thinking rate moves would read
+ * as unchanged and keep the old variant forever.
+ */
+function cardsEqual(a: RateCard, b: RateCard): boolean {
+  if (!ratesEqual(a.rates, b.rates)) {
+    return false
+  }
+  if (!a.reasoningRates || !b.reasoningRates) {
+    return a.reasoningRates === undefined && b.reasoningRates === undefined
+  }
+  return ratesEqual(a.reasoningRates, b.reasoningRates)
 }
 
 /**
@@ -138,7 +155,11 @@ export function mergeLiveQuote(
   }
   // Carried across whole: a tier is part of the quote, so grafting the base
   // rate while dropping the tier would price long requests at the new base.
-  const grafted = { rates: liveLatest.rates, contextTiers: liveLatest.contextTiers }
+  const grafted = {
+    rates: liveLatest.rates,
+    reasoningRates: liveLatest.reasoningRates,
+    contextTiers: liveLatest.contextTiers,
+  }
   const periods = observedFromMs > latest.from
     ? [...archive.periods, { from: observedFromMs, ...grafted }]
     // The archive's own last observation is no older than our evidence, so
@@ -168,6 +189,9 @@ export function scaleSchedule(base: PriceSchedule, multiplier: number, displayNa
     periods: base.periods.map(period => ({
       from: period.from,
       rates: scaleRates(period.rates, multiplier),
+      // Scaled like everything else: a fast variant of a qwen thinking model
+      // is still charged the thinking rate, at the premium tier's multiple.
+      reasoningRates: period.reasoningRates && scaleRates(period.reasoningRates, multiplier),
       peak: period.peak
         ? { windowsUtc: period.peak.windowsUtc, rates: scaleRates(period.peak.rates, multiplier) }
         : undefined,
@@ -176,6 +200,7 @@ export function scaleSchedule(base: PriceSchedule, multiplier: number, displayNa
       contextTiers: period.contextTiers?.map(tier => ({
         abovePromptTokens: tier.abovePromptTokens,
         rates: scaleRates(tier.rates, multiplier),
+        reasoningRates: tier.reasoningRates && scaleRates(tier.reasoningRates, multiplier),
       })),
     })),
   }

@@ -1,4 +1,4 @@
-import type { ContextTier, NormalizedSchedule, PriceBasis, PricePeriod, PriceSchedule, Rates, TimeInput } from './types'
+import type { ContextTier, NormalizedSchedule, PriceBasis, PricePeriod, PriceSchedule, RateCard, Rates, TimeInput } from './types'
 import { weightedRates } from './rates'
 import { DAY_MS, HOUR_MS } from './types'
 
@@ -32,33 +32,61 @@ export function isTimeSensitive(schedule: PriceSchedule): boolean {
 }
 
 /**
- * Whether any period of this schedule prices by prompt size at all.
+ * What the caller has told us about the *single request* a row describes.
  *
- * Lets callers that memoise a resolution leave prompt length out of their
- * key for the ~97% of models with no tiers, where it cannot change the
+ * Two of the four pricing dimensions are per-request rather than per-moment —
+ * how long the prompt was, and whether the request reasoned — and neither can
+ * be recovered from a sum. They travel together because they are answers to
+ * the same question ("what do we know about this one request?"), are gated by
+ * the same caller declaration, and are handled the same way when absent: the
+ * base card prices the row, and every card that was not ruled out widens
+ * `low`/`high`.
+ *
+ * A field left `undefined` means the caller did not say — never "no" — which
+ * is why `usedReasoning` is a tri-state rather than a plain boolean.
+ */
+export interface RequestFacts {
+  promptTokens?: number
+  usedReasoning?: boolean
+}
+
+/**
+ * Nothing known: an aggregated row, or a caller that never opted in.
+ *
+ * Exported and shared rather than built per call — this is the majority case,
+ * and `estimate` runs once per row, so a fresh `{}` each time would be an
+ * allocation to say nothing.
+ */
+export const NOTHING_KNOWN: RequestFacts = Object.freeze({ promptTokens: undefined, usedReasoning: undefined })
+
+/**
+ * Whether any period of this schedule prices by something only a single
+ * request can answer — prompt size or thinking mode.
+ *
+ * Lets callers that memoise a resolution leave those facts out of their key
+ * for the ~97% of models priced by neither, where they cannot change the
  * answer.
  */
-const HAS_TIERS = new WeakMap<PriceSchedule, boolean>()
+const PRICES_BY_REQUEST = new WeakMap<PriceSchedule, boolean>()
 
-export function hasContextTiers(schedule: PriceSchedule): boolean {
-  // Memoised on the schedule: this is read once per priced row to decide
-  // whether prompt length belongs in a memo key, while being a pure function
-  // of a table the catalogue holds for its lifetime. A weak key keeps that
-  // bounded by the catalogue rather than by traffic, and — unlike a flag on
-  // the object — does not mutate a table `normalizeSchedule` hands back by
-  // identity.
-  const known = HAS_TIERS.get(schedule)
+export function pricesByRequest(schedule: PriceSchedule): boolean {
+  // Memoised on the schedule: this is read once per priced row to decide what
+  // belongs in a memo key, while being a pure function of a table the
+  // catalogue holds for its lifetime. A weak key keeps that bounded by the
+  // catalogue rather than by traffic, and — unlike a flag on the object — does
+  // not mutate a table `normalizeSchedule` hands back by identity.
+  const known = PRICES_BY_REQUEST.get(schedule)
   if (known !== undefined) {
     return known
   }
   let found = false
   for (const period of schedule.periods) {
-    if (period.contextTiers && period.contextTiers.length > 0) {
+    if (period.contextTiers?.length || period.reasoningRates) {
       found = true
       break
     }
   }
-  HAS_TIERS.set(schedule, found)
+  PRICES_BY_REQUEST.set(schedule, found)
   return found
 }
 
@@ -107,21 +135,35 @@ export function contextTierFor(period: PricePeriod, promptTokens: number | undef
 }
 
 /**
- * The one card a period resolves to: peak window first, then prompt size.
+ * A card, or its thinking-mode variant when the request reasoned and the
+ * vendor prices that apart.
  *
- * The two never co-occur (`normalizeSchedule` enforces it), so this is a
- * pair of independent branches rather than a matrix.
+ * Applied to whichever card the other dimensions already chose, which is what
+ * keeps prompt size and thinking mode composing instead of multiplying: each
+ * card carries its own variant, so there is never a matrix to enumerate.
  */
-function cardFor(period: PricePeriod, atMs: number | undefined, promptTokens: number | undefined): Rates {
+function variantOf(card: RateCard, usedReasoning: boolean | undefined): Rates {
+  return usedReasoning && card.reasoningRates ? card.reasoningRates : card.rates
+}
+
+/**
+ * The one card a period resolves to: peak window first, then prompt size,
+ * then thinking mode.
+ *
+ * Peak and the two per-request dimensions never co-occur upstream — no vendor
+ * publishes both a peak schedule and either of the others — so peak is an
+ * early return rather than another axis.
+ */
+function cardFor(period: PricePeriod, atMs: number | undefined, facts: RequestFacts): Rates {
   if (atMs !== undefined && period.peak && isPeakHour(period.peak.windowsUtc, atMs)) {
     return period.peak.rates
   }
-  return contextTierFor(period, promptTokens)?.rates ?? period.rates
+  return variantOf(contextTierFor(period, facts.promptTokens) ?? period, facts.usedReasoning)
 }
 
 /** Exact rate card at one instant. */
-export function ratesAt(schedule: NormalizedSchedule, atMs: number, promptTokens?: number): Rates {
-  return cardFor(periodAt(schedule, atMs), atMs, promptTokens)
+export function ratesAt(schedule: NormalizedSchedule, atMs: number, facts: RequestFacts = NOTHING_KNOWN): Rates {
+  return cardFor(periodAt(schedule, atMs), atMs, facts)
 }
 
 /**
@@ -173,15 +215,16 @@ function weightedPeriods(
 }
 
 /**
- * The tier cards a period could still have charged, memoised on the period —
- * empty unless the caller left the prompt length unstated.
+ * The cards a period could still have charged, given what the caller did not
+ * state — memoised on the period, and empty when they stated everything.
  *
  * A row the caller has not declared per-request is priced at the base card,
  * which is the right single number — a sum cannot say whether any request
- * inside it crossed a threshold. But it is not a *certainty*, and reporting
- * `low === high === base` claims one: on a tiered model the same counts can
- * cost nearly twice as much. These are the cards those requests would have
- * paid, so the estimate can state the interval instead of hiding it.
+ * inside it crossed a prompt threshold or reasoned. But it is not a
+ * certainty*, and reporting `low === high === base` claims one: on a tiered
+ * model the same counts can cost nearly twice as much, and on a qwen thinking
+ * model over three times. These are the cards those requests would have paid,
+ * so the estimate can state the interval instead of hiding it.
  *
  * The base card is deliberately NOT in here. Every caller has already priced
  * it — it is either the card the resolution returned or one of the blend's
@@ -190,24 +233,49 @@ function weightedPeriods(
  * array leaking into three call sites.
  *
  * Memoised because `ratesFor`'s flat path runs once per priced row while this
- * array is a pure function of the period. Periods come from tables the
- * catalogue holds for its lifetime, so a weak key is bounded by the
- * catalogue rather than by traffic.
+ * array is a pure function of the period and of *which* facts are missing.
+ * Periods come from tables the catalogue holds for its lifetime, so a weak key
+ * is bounded by the catalogue rather than by traffic; the four combinations of
+ * missing facts are held per period in one small record.
  */
-const TIER_CARDS_BY_PERIOD = new WeakMap<PricePeriod, Rates[]>()
+// Indexed by which facts were left unstated, so the lookup costs no string:
+// bit 0 is an open prompt length, bit 1 an open thinking mode.
+type UnruledOut = Array<Rates[] | undefined>
+const UNRULED_OUT_BY_PERIOD = new WeakMap<PricePeriod, UnruledOut>()
 
-function tierCards(period: PricePeriod, promptTokens: number | undefined): Rates[] | undefined {
-  // A stated prompt length selects one card and rules the rest out; there is
-  // nothing left to bound.
-  if (promptTokens !== undefined || !period.contextTiers?.length) {
+function unruledOutCards(period: PricePeriod, facts: RequestFacts): Rates[] | undefined {
+  const openPrompt = facts.promptTokens === undefined && !!period.contextTiers?.length
+  // A caller who says nothing about reasoning leaves the variant open; one who
+  // says `false` has ruled it out, and one who says `true` is already paying
+  // it. Only the first is uncertainty.
+  const openReasoning = facts.usedReasoning === undefined
+  if (!openPrompt && !openReasoning) {
     return undefined
   }
-  let cards = TIER_CARDS_BY_PERIOD.get(period)
-  if (!cards) {
-    cards = period.contextTiers.map(tier => tier.rates)
-    TIER_CARDS_BY_PERIOD.set(period, cards)
+  const key = (openPrompt ? 1 : 0) | (openReasoning ? 2 : 0)
+  let cache = UNRULED_OUT_BY_PERIOD.get(period)
+  if (!cache) {
+    cache = [undefined, undefined, undefined, undefined]
+    UNRULED_OUT_BY_PERIOD.set(period, cache)
   }
-  return cards
+  let cards = cache[key]
+  if (!cards) {
+    cards = []
+    // Every card reachable under the open facts, minus the base card the
+    // caller already priced. With the prompt open that is each tier; with
+    // reasoning open it is each of those cards' thinking variants too.
+    const reachable: RateCard[] = openPrompt ? [period, ...period.contextTiers!] : [period]
+    for (const card of reachable) {
+      if (card !== period) {
+        cards.push(card.rates)
+      }
+      if (openReasoning && card.reasoningRates) {
+        cards.push(card.reasoningRates)
+      }
+    }
+    cache[key] = cards
+  }
+  return cards.length > 0 ? cards : undefined
 }
 
 /**
@@ -237,15 +305,15 @@ export function blendParts(
   schedule: NormalizedSchedule,
   fromMs: number,
   toMs: number,
-  promptTokens?: number,
+  facts: RequestFacts = NOTHING_KNOWN,
 ): Array<{ rates: Rates, weight: number }> {
   const start = blendStart(fromMs, toMs)
   if (!(toMs > start)) {
-    return [{ rates: ratesAt(schedule, start, promptTokens), weight: 1 }]
+    return [{ rates: ratesAt(schedule, start, facts), weight: 1 }]
   }
   // `parts` is never empty: the first period opens at -Infinity and
   // `toMs > start` was checked above, so at least one segment has span.
-  return partsFor(weightedPeriods(schedule, start, toMs), promptTokens)
+  return partsFor(weightedPeriods(schedule, start, toMs), facts)
 }
 
 /**
@@ -259,7 +327,7 @@ export function blendParts(
  */
 function partsFor(
   segments: Array<{ period: PricePeriod, from: number, to: number }>,
-  promptTokens: number | undefined,
+  facts: RequestFacts,
 ): Array<{ rates: Rates, weight: number }> {
   const parts: Array<{ rates: Rates, weight: number }> = []
   for (const { period, from, to } of segments) {
@@ -270,8 +338,8 @@ function partsFor(
     }
     else {
       // A period with tiers has no peak, so its whole span pays whichever
-      // single card the prompt selects.
-      parts.push({ rates: contextTierFor(period, promptTokens)?.rates ?? period.rates, weight: span })
+      // single card the request's own facts select.
+      parts.push({ rates: variantOf(contextTierFor(period, facts.promptTokens) ?? period, facts.usedReasoning), weight: span })
     }
   }
   return parts
@@ -286,8 +354,28 @@ function partsFor(
  * the time axis has already been aggregated away. Callers that *do* have a
  * timestamp pass `at` instead and get the exact rate.
  */
-export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number, promptTokens?: number): Rates {
-  return weightedRates(blendParts(schedule, fromMs, toMs, promptTokens))
+export function blendRates(schedule: NormalizedSchedule, fromMs: number, toMs: number, facts?: RequestFacts): Rates {
+  return weightedRates(blendParts(schedule, fromMs, toMs, facts))
+}
+
+const FLAT_RESOLUTION = new WeakMap<PricePeriod, ResolvedRates>()
+
+/**
+ * Build a `ResolvedRates` with every field present, in one order.
+ *
+ * One shape across every return site, so the fields `estimate` and
+ * `priceCardFor` read once per row are a monomorphic load rather than four
+ * hidden classes. Costs nothing either way, and it keeps the four sites from
+ * drifting apart.
+ */
+function resolved(
+  rates: Rates,
+  basis: PriceBasis,
+  cards: Rates[] | undefined,
+  tierAbove: number | undefined,
+  reasoningMode: boolean | undefined,
+): ResolvedRates {
+  return { rates, basis, cards, tierAbove, reasoningMode }
 }
 
 /**
@@ -304,9 +392,9 @@ export interface ResolvedRates {
    * for a cost interval, not a claim that any of them was applied.
    *
    * Two things put a card in here. A blend averaged it (the peak and
-   * off-peak ends of a window), or the caller left the prompt length
-   * unstated on a model that prices by it, so a long request inside the row
-   * would have paid a tier — see `tierBounds`.
+   * off-peak ends of a window), or the caller left one of the per-request
+   * facts unstated on a model priced by it, so a long or reasoning request
+   * inside the row would have paid a dearer card — see `unruledOutCards`.
    *
    * Absent when the resolution really did have exactly one possible card,
    * which is nearly every row.
@@ -325,6 +413,8 @@ export interface ResolvedRates {
    * tier and claiming one would be a lie about which rate was applied.
    */
   tierAbove?: number
+  /** Whether the card returned is a thinking-mode variant. */
+  reasoningMode?: boolean
 }
 
 /**
@@ -337,7 +427,7 @@ export function ratesFor(
   at: TimeInput,
   window: readonly [TimeInput, TimeInput] | undefined,
   now: number = Date.now(),
-  promptTokens?: number,
+  facts: RequestFacts = NOTHING_KNOWN,
 ): ResolvedRates {
   if (!isTimeSensitive(schedule)) {
     // Flat in time, which is nearly every model — but not necessarily flat
@@ -346,22 +436,26 @@ export function ratesFor(
     // tiered flat schedule is still exact rather than averaged.
     const period = schedule.periods[0]!
     // Ahead of everything else, because this is the hottest line in the
-    // package: ~97% of models have no tiers, and for those the whole prompt
-    // dimension cannot change the answer. Returning here keeps them on the
-    // same two-property result they had before tiers existed.
-    if (!period.contextTiers?.length) {
-      return { rates: period.rates, basis: 'flat' }
+    // package: ~97% of models are priced by neither per-request dimension,
+    // and for those nothing below can change the answer. Returning here keeps
+    // them on the same two-property result they had before either existed.
+    if (!period.contextTiers?.length && !period.reasoningRates) {
+      // Memoised, not built: for a schedule that is flat in time and priced by
+      // neither per-request dimension — ~97% of models, and the hottest path in
+      // the package — this result is a pure function of the period and cannot
+      // vary by row. `estimate` only reads it, so one instance is shared.
+      let only = FLAT_RESOLUTION.get(period)
+      if (!only) {
+        only = resolved(period.rates, 'flat', undefined, undefined, undefined)
+        FLAT_RESOLUTION.set(period, only)
+      }
+      return only
     }
-    const tier = contextTierFor(period, promptTokens)
-    return tier
-      ? { rates: tier.rates, basis: 'flat', tierAbove: tier.abovePromptTokens }
-      // `cards` rather than nothing when the prompt length was never stated:
-      // the base card is the estimate, but a tier was not ruled out.
-      : { rates: period.rates, basis: 'flat', cards: tierCards(period, promptTokens) }
+    return resolveCard(period, undefined, 'flat', facts)
   }
   const atMs = toMs(at)
   if (atMs !== null) {
-    return exactAt(schedule, atMs, promptTokens)
+    return exactAt(schedule, atMs, facts)
   }
   const from = window ? toMs(window[0]) : null
   const until = window ? toMs(window[1]) : null
@@ -371,7 +465,7 @@ export function ratesFor(
   // last 365 days, which under-charges any model whose price has since
   // risen and made the two entry points disagree on the same row.
   if (from === null && until === null) {
-    return exactAt(schedule, now, promptTokens)
+    return exactAt(schedule, now, facts)
   }
   const begin = from ?? Number.NEGATIVE_INFINITY
   const end = until ?? now
@@ -379,14 +473,14 @@ export function ratesFor(
   // still names the same interval; zero-width, it names an instant and
   // there is nothing to average.
   if (begin === end) {
-    return exactAt(schedule, begin, promptTokens)
+    return exactAt(schedule, begin, facts)
   }
   // A window is an interval, not an ordered pair, so normalise it before
   // blending rather than duplicating the call.
   const [lo, hi] = begin > end ? [end, begin] : [begin, end]
   // One walk, three consumers — see `partsFor`.
   const segments = weightedPeriods(schedule, blendStart(lo, hi), hi)
-  const parts = partsFor(segments, promptTokens)
+  const parts = partsFor(segments, facts)
   const cards: Rates[] = []
   for (const part of parts) {
     // Zero-weight segments never influenced the average, so they must not
@@ -396,36 +490,73 @@ export function ratesFor(
       cards.push(part.rates)
     }
   }
-  // The two halves below are mutually exclusive by construction: a stated
-  // prompt length selects one tier and leaves nothing to bound, an unstated
-  // one bounds every tier and lets no card claim to be the one applied.
-  let tierAbove: number | undefined
-  if (promptTokens === undefined) {
-    for (const { period } of segments) {
-      const tiers = tierCards(period, promptTokens)
-      if (tiers) {
-        cards.push(...tiers)
-      }
+  for (const { period } of segments) {
+    const unruled = unruledOutCards(period, facts)
+    if (unruled) {
+      cards.push(...unruled)
     }
   }
-  else {
-    tierAbove = blendedTierAbove(segments, promptTokens)
-  }
-  return { rates: weightedRates(parts), basis: 'blended', cards, tierAbove }
+  return resolved(
+    weightedRates(parts),
+    'blended',
+    cards,
+    // Both claims hold only when every weighted segment agrees — a window
+    // spanning the day a premium was withdrawn averages a card that belongs
+    // to neither side, and naming one would be a lie about what was applied.
+    facts.promptTokens === undefined ? undefined : blendedTierAbove(segments, facts.promptTokens),
+    blendedReasoningMode(segments, facts),
+  )
 }
 
-/** The one card in force at an instant, plus which tier produced it. */
-function exactAt(schedule: NormalizedSchedule, atMs: number, promptTokens: number | undefined): ResolvedRates {
-  const period = periodAt(schedule, atMs)
-  return {
-    rates: cardFor(period, atMs, promptTokens),
-    basis: 'exact',
-    tierAbove: contextTierFor(period, promptTokens)?.abovePromptTokens,
+/**
+ * One period resolved to one card, with what that card claims to be.
+ *
+ * Shared by the flat path and `exactAt`, which differ only in whether a peak
+ * window can apply: they were the same three questions asked twice, and a rule
+ * added to one of them would have quietly missed the other.
+ */
+function resolveCard(
+  period: PricePeriod,
+  atMs: number | undefined,
+  basis: PriceBasis,
+  facts: RequestFacts,
+): ResolvedRates {
+  const rates = cardFor(period, atMs, facts)
+  const tier = contextTierFor(period, facts.promptTokens)
+  return resolved(
+    rates,
+    basis,
     // Knowing *when* the tokens were spent says nothing about how long the
-    // prompt was, so an exact instant bounds its tiers exactly as a flat
-    // schedule does.
-    cards: tierCards(period, promptTokens),
+    // prompt was or whether the request reasoned, so an instant bounds those
+    // exactly as a flat schedule does.
+    unruledOutCards(period, facts),
+    tier?.abovePromptTokens,
+    rates === (tier ?? period).reasoningRates ? true : undefined,
+  )
+}
+
+/** The one card in force at an instant, plus what it claims to be. */
+function exactAt(schedule: NormalizedSchedule, atMs: number, facts: RequestFacts): ResolvedRates {
+  return resolveCard(periodAt(schedule, atMs), atMs, 'exact', facts)
+}
+
+/**
+ * Whether every weighted segment charged the thinking variant, so a blend can
+ * honestly say it was applied.
+ */
+function blendedReasoningMode(
+  segments: Array<{ period: PricePeriod }>,
+  facts: RequestFacts,
+): boolean | undefined {
+  if (!facts.usedReasoning) {
+    return undefined
   }
+  for (const { period } of segments) {
+    if (!(contextTierFor(period, facts.promptTokens) ?? period).reasoningRates) {
+      return undefined
+    }
+  }
+  return true
 }
 
 /**

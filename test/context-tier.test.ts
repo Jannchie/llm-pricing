@@ -8,7 +8,7 @@ import { mergeSnapshot } from '../src/catalog/sync'
 import { promptTokensBilled } from '../src/estimate'
 import { normalizeSchedule } from '../src/normalize'
 import { mergeLiveQuote, periodPricesEqual, scaleSchedule } from '../src/rates'
-import { contextTierFor, hasContextTiers, ratesFor } from '../src/schedule'
+import { contextTierFor, pricesByRequest, ratesFor } from '../src/schedule'
 import { sumEstimates } from '../src/total'
 import { DAY_MS, RATE_KEYS } from '../src/types'
 
@@ -184,8 +184,8 @@ describe('selecting a long-context tier', () => {
 
   it('exposes the tier through getprice for display', () => {
     expect(catalog.getPrice('gpt-5.5')?.inputCostPerToken).toBe(5e-6)
-    expect(catalog.getPrice('gpt-5.5', undefined, 400_000)?.inputCostPerToken).toBe(10e-6)
-    expect(catalog.getPrice('gpt-5.5', undefined, 400_000)?.contextTierAbove).toBe(272_000)
+    expect(catalog.getPrice('gpt-5.5', undefined, { promptTokens: 400_000 })?.inputCostPerToken).toBe(10e-6)
+    expect(catalog.getPrice('gpt-5.5', undefined, { promptTokens: 400_000 })?.contextTierAbove).toBe(272_000)
   })
 })
 
@@ -413,13 +413,13 @@ describe('the schedule primitives', () => {
   })
 
   it('reports whether a schedule prices by prompt size at all', () => {
-    expect(hasContextTiers(GPT_55)).toBe(true)
-    expect(hasContextTiers({ source: 'fallback', periods: [{ from: Number.NEGATIVE_INFINITY, rates: rates(1, 2) }] })).toBe(false)
+    expect(pricesByRequest(GPT_55)).toBe(true)
+    expect(pricesByRequest({ source: 'fallback', periods: [{ from: Number.NEGATIVE_INFINITY, rates: rates(1, 2) }] })).toBe(false)
   })
 
   it('applies a tier on the flat fast path, which is where most tiered models live', () => {
     const normalized = normalizeSchedule(GPT_55)!
-    const resolved = ratesFor(normalized, undefined, undefined, Date.now(), 400_000)
+    const resolved = ratesFor(normalized, undefined, undefined, Date.now(), { promptTokens: 400_000 })
     expect(resolved.basis).toBe('flat')
     expect(resolved.rates.inputCostPerToken).toBe(10e-6)
     expect(resolved.tierAbove).toBe(272_000)

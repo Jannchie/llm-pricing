@@ -10,6 +10,12 @@
 //      the UTC hour a request lands in.
 //   3. Prompt size — a request whose prompt exceeds a threshold is billed
 //      at a dearer card for its whole length. See `ContextTier`.
+//   4. Thinking mode — Alibaba bills a request that reasoned at a dearer
+//      card, for its whole response. See `RateCard.reasoningRates`.
+//
+// The last two are properties of a single request rather than of a moment, so
+// both are gated on the caller saying the row is one (`perRequest`), and both
+// widen `low`/`high` rather than being guessed at when it does not.
 //
 // Everything else in the catalogue has a single flat period and pays no
 // cost for those dimensions existing: `ratesFor` short-circuits to the
@@ -82,6 +88,48 @@ export type ModelPrice = Rates & {
    * into the base rate.
    */
   contextTierAbove?: number
+  /**
+   * Whether this card is the thinking-mode variant — see `RateCard`. Part of
+   * the card's identity for the same reason `contextTierAbove` is: "the output
+   * rate" and "the output rate in thinking mode" are two facts about one
+   * model, and `sumEstimates` keys on both so a mixed workload reports them
+   * apart rather than averaged.
+   */
+  reasoningMode?: boolean
+}
+
+/**
+ * A rate card, plus the variant a request that used *thinking* pays instead.
+ *
+ * Alibaba is the vendor this exists for, and it publishes the rule plainly:
+ * `qwen-plus` bills output at $1.2/MTok normally and **$4/MTok in thinking
+ * mode**, under a column headed 思维链+回答 — "chain of thought AND answer".
+ * So it is not a separate price for reasoning tokens; it replaces the card for
+ * the whole response. Perplexity's `sonar-deep-research` does the other thing
+ * — $3/MTok for reasoning tokens *added to* $8/MTok output — and that one is
+ * deliberately not modelled here, because the two cannot share a shape. See
+ * `reasoningRatesFrom` for how the two are told apart.
+ *
+ * A variant hangs off each card rather than off the period, because the two
+ * request-scale dimensions genuinely compose: Alibaba's Beijing listing prices
+ * a 128k-256k prompt at $2.868/MTok output normally and $3.441 in thinking
+ * mode. Upstream publishes no model with both today, but the vendor's own
+ * table has both axes, so the shape has to allow it.
+ */
+export interface RateCard {
+  rates: Rates
+  /**
+   * What this card costs for a request that used thinking. Absent — the
+   * overwhelming majority — means the vendor charges thinking output at the
+   * same rate as any other output, which is what 97 of the 143 models
+   * quoting the field say explicitly.
+   *
+   * Only consulted when the caller states the row describes a single request,
+   * for the same reason a long-context tier is: a sum of thinking and
+   * non-thinking requests cannot be attributed to either card. See
+   * `EstimateArgs.perRequest`.
+   */
+  reasoningRates?: Rates
 }
 
 /**
@@ -107,19 +155,17 @@ export type ModelPrice = Rates & {
  *   2026-03-13 and was then withdrawn, so a schedule has to carry a tier
  *   for its old periods and none for its new ones.
  */
-export interface ContextTier {
+export interface ContextTier extends RateCard {
   /** Strictly greater than: a prompt of exactly this size pays the base card. */
   abovePromptTokens: number
-  rates: Rates
 }
 
 // One contiguous slice of a model's price history. `rates` is the flat
 // (or off-peak) card; `peak` overrides it inside daily [startHour, endHour)
 // **UTC** windows. Whole hours only — a consumer anchoring rows to a UTC
 // hour could not honour a window boundary at :30 exactly.
-export interface PricePeriod {
+export interface PricePeriod extends RateCard {
   from: number
-  rates: Rates
   peak?: { windowsUtc: Array<[number, number]>, rates: Rates }
   /**
    * Long-context tiers, ascending by threshold; the highest one the prompt

@@ -1,7 +1,7 @@
 import type { Rates } from '../types'
 import type { ModelsDevCost, ModelsDevResponse } from './modelsdev'
 import { closeEnough } from '../rates'
-import { contextTiersFrom, isUsableCost, ratesFromCost } from './modelsdev'
+import { contextTiersFrom, isUsableCost, ratesFromCost, reasoningRatesFrom } from './modelsdev'
 
 /**
  * The merge behind `pnpm sync`, separated from the script so it can be
@@ -22,14 +22,17 @@ import { contextTiersFrom, isUsableCost, ratesFromCost } from './modelsdev'
  * The on-disk archive format, shared with the reader in `fallback.ts` so the
  * two cannot disagree about the tuple's arity or order. `$/MTok`.
  *
- * The trailing `tiers` element is optional, so every period written before
- * long-context tiers existed still reads correctly — a 5-element row means
- * "no tier", which is what those models were archived as.
+ * The trailing elements are optional and positional, so every period written
+ * before a dimension existed still reads correctly: a 5-element row means "no
+ * tier, no thinking rate", which is what those models were archived as. A
+ * model with a thinking rate but no tiers writes `null` in the tier slot,
+ * because the slots cannot be reordered without rewriting history.
  */
 export type SnapshotTier = [abovePromptTokens: number, input: number, cacheWrite: number, cacheRead: number, output: number]
 export type SnapshotPeriod
   = | [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number]
-  | [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number, tiers: SnapshotTier[]]
+  | [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number, tiers: SnapshotTier[] | null]
+  | [from: string | null, input: number, cacheWrite: number, cacheRead: number, output: number, tiers: SnapshotTier[] | null, reasoningOutput: number]
 export type SnapshotEntry = [displayName: string, periods: SnapshotPeriod[]]
 export type SnapshotModels = Record<string, SnapshotEntry>
 
@@ -38,9 +41,10 @@ export interface SyncResult {
   added: number
   repriced: number
   /**
-   * Models whose latest period gained long-context tiers without any change
-   * to its base rates — new *information*, corrected in place rather than
-   * appended. See `backfilledTiers`.
+   * Models whose latest period gained a dimension — long-context tiers or a
+   * thinking-mode rate — without any change to the rates already recorded.
+   * New *information*, corrected in place rather than appended. See
+   * `isDimensionBackfill`.
    */
   backfilled: number
   /** Present in the archive, no longer listed upstream. Kept. */
@@ -67,17 +71,20 @@ function sameRates(a: readonly number[], b: readonly number[]): boolean {
  * held steady has to read as a reprice, or the archive keeps yesterday's
  * long-context rate forever.
  */
-function archivedRates(cost: ModelsDevCost): { base: ArchivedRates, tiers: SnapshotTier[] } {
+function archivedRates(cost: ModelsDevCost): { base: ArchivedRates, tiers: SnapshotTier[], reasoningOutput: number | undefined } {
   // Both halves read through the same functions the live index uses, rather
   // than a second copy of the filtering and defaulting. The two had already
   // drifted once by construction: a rule that only the live path applied
   // would let a quote it corrects be archived uncorrected, and the archive is
   // what answers whenever the network is down.
+  const base = ratesFromCost(cost, 1)
   return {
-    base: flatten(ratesFromCost(cost, 1)),
+    base: flatten(base),
     tiers: (contextTiersFrom(cost, 1) ?? []).map(
       ({ abovePromptTokens, rates }): SnapshotTier => [abovePromptTokens, ...flatten(rates)],
     ),
+    // Only the output rate differs in thinking mode, so one number archives it.
+    reasoningOutput: reasoningRatesFrom(cost, base, 1)?.outputCostPerToken,
   }
 }
 
@@ -101,9 +108,13 @@ function flatten(rates: Rates): ArchivedRates {
   ]
 }
 
-/** Flatten a period's rates for comparison, tiers included. */
+/** Flatten a period's rates for comparison, every dimension included. */
 function comparable(period: SnapshotPeriod): number[] {
-  return [...period.slice(1, 5) as number[], ...(period[5] ?? []).flat()]
+  return [
+    ...period.slice(1, 5) as number[],
+    ...(period[5] ?? []).flat(),
+    ...(period[6] === undefined ? [] : [period[6]]),
+  ]
 }
 
 /**
@@ -131,10 +142,19 @@ function comparable(period: SnapshotPeriod): number[] {
  * that appears is news, and backfilling it would assert a premium over
  * history that nobody was charged.
  */
-function isTierBackfill(previous: SnapshotPeriod, next: SnapshotPeriod): boolean {
-  return previous[5] === undefined
-    && next[5] !== undefined
-    && sameRates(previous.slice(1, 5) as number[], next.slice(1, 5) as number[])
+function isDimensionBackfill(previous: SnapshotPeriod, next: SnapshotPeriod): boolean {
+  if (!sameRates(previous.slice(1, 5) as number[], next.slice(1, 5) as number[])) {
+    return false
+  }
+  // Every dimension the incoming observation adds must be one the archive
+  // simply has no slot filled for. A dimension that *changed* is a reprice.
+  const gainedTiers = !previous[5] && !!next[5]
+  const gainedReasoning = previous[6] === undefined && next[6] !== undefined
+  const keptTiers = sameRates((previous[5] ?? []).flat(), (next[5] ?? []).flat())
+  const keptReasoning = previous[6] === next[6]
+  return (gainedTiers || gainedReasoning)
+    && (gainedTiers || keptTiers)
+    && (gainedReasoning || keptReasoning)
 }
 
 /**
@@ -144,8 +164,8 @@ function isTierBackfill(previous: SnapshotPeriod, next: SnapshotPeriod): boolean
  * vendor introducing a premium — the two are indistinguishable in the data,
  * so the archive's own state is what separates them.
  */
-function archiveHasTiers(models: SnapshotModels): boolean {
-  return Object.values(models).some(entry => entry[1].some(period => period[5] !== undefined))
+function archiveRecords(models: SnapshotModels, slot: 5 | 6): boolean {
+  return Object.values(models).some(entry => entry[1].some(period => period[slot] !== undefined))
 }
 
 export function mergeSnapshot(
@@ -162,7 +182,11 @@ export function mergeSnapshot(
   // Read from the incoming archive, once, so it cannot flip partway through
   // a run: the first model to gain a tier must not change how the next is
   // treated.
-  const mayBackfill = !archiveHasTiers(previous)
+  // Read per dimension: tiers are already recorded, so a tier appearing now is
+  // news, while a thinking rate has never been recorded and its first sighting
+  // is this package learning to see it. One flag for both would have made the
+  // second migration impossible.
+  const mayBackfill = { 5: !archiveRecords(previous, 5), 6: !archiveRecords(previous, 6) }
 
   for (const provider of providers) {
     for (const [id, model] of Object.entries(api[provider]?.models ?? {})) {
@@ -177,11 +201,13 @@ export function mergeSnapshot(
       }
       seen.add(key)
       // Stored as models.dev publishes them, per MTok — hence divisor 1.
-      const { base, tiers } = archivedRates(cost)
-      // The tier element is written only when there is one, so a model
-      // without tiers produces the same 5-element row it always has and the
+      const { base, tiers, reasoningOutput } = archivedRates(cost)
+      // Trailing slots are written only as far as needed, so a model with
+      // neither dimension produces the same 5-element row it always has and the
       // committed archive diffs cleanly.
-      const period = (tiers.length > 0 ? [null, ...base, tiers] : [null, ...base]) as SnapshotPeriod
+      const period = (reasoningOutput === undefined
+        ? tiers.length > 0 ? [null, ...base, tiers] : [null, ...base]
+        : [null, ...base, tiers.length > 0 ? tiers : null, reasoningOutput]) as SnapshotPeriod
       const displayName = typeof model.name === 'string' ? model.name : id
 
       const before = models[key]
@@ -200,7 +226,9 @@ export function mergeSnapshot(
         models[key] = [displayName, periods]
         continue
       }
-      if (mayBackfill && isTierBackfill(latest, period)) {
+      const backfillable = (!latest[5] && !!period[5] && mayBackfill[5])
+        || (latest[6] === undefined && period[6] !== undefined && mayBackfill[6])
+      if (backfillable && isDimensionBackfill(latest, period)) {
         // New information about the period that already exists, not a new
         // period — see `isTierBackfill`. The effective date is left alone.
         const corrected = [latest[0], ...period.slice(1)] as SnapshotPeriod

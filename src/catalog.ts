@@ -1,18 +1,18 @@
 import type { PricingCache } from './cache'
 import type { BilledTokens, TokenCounts } from './estimate'
 import type { RowOptions } from './row'
-import type { ResolvedRates } from './schedule'
+import type { RequestFacts, ResolvedRates } from './schedule'
 import type { PricingSource } from './sources'
 import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates, TimeInput } from './types'
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
-import { billedTokens, costFromBilled, promptOfBilled, totalOfBilled } from './estimate'
+import { billedTokens, costFromBilled, promptOfBilled, totalOfBilled, usedReasoning } from './estimate'
 import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
 import { estimateCostFromRow as estimateRow } from './row'
-import { hasContextTiers, isTimeSensitive, ratesFor, toMs } from './schedule'
+import { isTimeSensitive, NOTHING_KNOWN, pricesByRequest, ratesFor, toMs } from './schedule'
 import { modelsDevSource } from './sources'
 
 const DEFAULT_REFRESH_MS = 24 * 60 * 60 * 1000
@@ -575,31 +575,46 @@ export class PricingCatalog {
    * request parameters is an unbounded structure hanging off schedules that
    * — for flat models — the constructor owns and never releases.
    */
-  private readonly lastBlend = new WeakMap<NormalizedSchedule, { from: number, to: number, promptTokens: number | undefined, resolved: ResolvedRates }>()
+  private readonly lastBlend = new WeakMap<NormalizedSchedule, {
+    from: number
+    to: number
+    promptTokens: number | undefined
+    usedReasoning: boolean | undefined
+    resolved: ResolvedRates
+  }>()
 
   /**
-   * The prompt length to select a long-context tier against, or undefined
-   * when the caller has not said this row is a single request.
+   * What this row says about the single request behind it — nothing at all
+   * unless the caller declared it to be one.
    *
-   * `promptTokens` implies `perRequest`: a caller who states the prompt
-   * length has necessarily told us the row describes one prompt.
+   * `promptTokens` implies `perRequest`: a caller who states the prompt length
+   * has necessarily told us the row describes one prompt. `usedReasoning` is
+   * always derived, never asserted by the caller, because the counts answer it
+   * directly and a producer that reports no reasoning tokens has said as much.
    */
-  private promptTokensFor(args: EstimateArgs, billed: BilledTokens): number | undefined {
-    if (args.promptTokens !== undefined) {
-      const n = Number(args.promptTokens)
-      return Number.isFinite(n) && n > 0 ? n : 0
+  private factsFor(args: EstimateArgs, billed: BilledTokens): RequestFacts {
+    if (args.promptTokens === undefined && !args.perRequest) {
+      return NOTHING_KNOWN
     }
-    return args.perRequest ? promptOfBilled(billed) : undefined
+    let promptTokens: number
+    if (args.promptTokens === undefined) {
+      promptTokens = promptOfBilled(billed)
+    }
+    else {
+      const n = Number(args.promptTokens)
+      promptTokens = Number.isFinite(n) && n > 0 ? n : 0
+    }
+    return { promptTokens, usedReasoning: usedReasoning(args) }
   }
 
-  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs, promptTokens: number | undefined): ResolvedRates {
+  private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs, facts: RequestFacts): ResolvedRates {
     // Before anything else: a flat schedule ignores time entirely and
     // returns its one card, so every step below would be work spent to
     // memoise a `periods.length` check — and would pin a WeakMap entry to a
     // schedule the constructor holds forever. Flat is nearly every model.
     const window = args.window
     if (!window || !isTimeSensitive(schedule) || toMs(args.at) !== null) {
-      return ratesFor(schedule, args.at, window, Date.now(), promptTokens)
+      return ratesFor(schedule, args.at, window, Date.now(), facts)
     }
     const a = toMs(window[0])
     const b = toMs(window[1])
@@ -608,62 +623,68 @@ export class PricingCatalog {
     // Only a fully-bounded window makes the result a pure function of the
     // key.
     if (a === null || b === null) {
-      return ratesFor(schedule, args.at, window, Date.now(), promptTokens)
+      return ratesFor(schedule, args.at, window, Date.now(), facts)
     }
     // A window is an interval, not an ordered pair — `ratesFor` says so and
     // normalises it, so the slot has to agree or the same interval written
     // backwards misses.
     const from = Math.min(a, b)
     const to = Math.max(a, b)
-    // Prompt length is part of the key, not just the window: two rows over
-    // the same window can land in different long-context tiers, and a slot
-    // keyed on the window alone would hand the second row the first one's
-    // card. Dropped from the key entirely for a schedule with no tiers —
-    // nearly all of them — where it cannot change the answer and would
-    // otherwise turn every row into a miss.
-    const tierKey = hasContextTiers(schedule) ? promptTokens : undefined
+    // The request facts are part of the key, not just the window: two rows over
+    // the same window can land in different long-context tiers or differ on
+    // thinking, and a slot keyed on the window alone would hand the second row
+    // the first one's card. Dropped from the key entirely for a schedule
+    // priced by neither — nearly all of them — where they cannot change the
+    // answer and would otherwise turn every row into a miss.
+    // Compared field by field rather than through a composed key, because a
+    // key would be a string allocated once per row to answer a two-field
+    // question.
+    const keyed = pricesByRequest(schedule)
+    const promptTokens = keyed ? facts.promptTokens : undefined
+    const usedReasoning = keyed ? facts.usedReasoning : undefined
     const hit = this.lastBlend.get(schedule)
-    if (hit && hit.from === from && hit.to === to && hit.promptTokens === tierKey) {
+    if (hit && hit.from === from && hit.to === to && hit.promptTokens === promptTokens && hit.usedReasoning === usedReasoning) {
       return hit.resolved
     }
-    const resolved = ratesFor(schedule, undefined, window, Date.now(), promptTokens)
-    this.lastBlend.set(schedule, { from, to, promptTokens: tierKey, resolved })
+    const resolved = ratesFor(schedule, undefined, window, Date.now(), facts)
+    this.lastBlend.set(schedule, { from, to, promptTokens, usedReasoning, resolved })
     return resolved
   }
 
-  private priceCardFor(schedule: PriceSchedule, rates: Rates, tierAbove?: number): ModelPrice {
-    const cached = this.priceCards.get(rates)
+  private priceCardFor(schedule: PriceSchedule, resolved: ResolvedRates): ModelPrice {
+    const cached = this.priceCards.get(resolved.rates)
     if (cached) {
       return cached
     }
     const card: ModelPrice = {
-      ...rates,
+      ...resolved.rates,
       displayName: schedule.displayName,
       source: schedule.source,
       providerId: schedule.providerId,
-      // Safe to memoise on the rates object even though it is a second key:
-      // a tier's card is a distinct object owned by exactly one tier, so a
-      // given `Rates` can never be reached through two thresholds.
-      contextTierAbove: tierAbove,
+      // Safe to memoise on the rates object even though these are further
+      // keys: every variant card is a distinct object owned by exactly one
+      // tier and one mode, so a given `Rates` can never be reached twice.
+      contextTierAbove: resolved.tierAbove,
+      reasoningMode: resolved.reasoningMode,
     }
-    this.priceCards.set(rates, card)
+    this.priceCards.set(resolved.rates, card)
     return card
   }
 
   /**
    * Resolve a model to the flat rate card that applies at `at` (default: now).
    *
-   * `promptTokens` selects a long-context tier, for showing what a request of
-   * that size would be charged. Omitted, the base card is returned — which is
-   * the right answer for "what does this model cost".
+   * `facts` selects a per-request variant, for showing what a request of that
+   * shape would be charged — `{ promptTokens }` for a long-context tier,
+   * `{ usedReasoning: true }` for thinking mode. Omitted, the base card is
+   * returned, which is the right answer for "what does this model cost".
    */
-  getPrice(model: string, at?: TimeInput, promptTokens?: number): ModelPrice | null {
+  getPrice(model: string, at?: TimeInput, facts?: RequestFacts): ModelPrice | null {
     const schedule = this.getSchedule(model)
     if (!schedule) {
       return null
     }
-    const resolved = ratesFor(schedule, at ?? Date.now(), undefined, Date.now(), promptTokens)
-    return this.priceCardFor(schedule, resolved.rates, resolved.tierAbove)
+    return this.priceCardFor(schedule, ratesFor(schedule, at ?? Date.now(), undefined, Date.now(), facts))
   }
 
   /**
@@ -678,15 +699,16 @@ export class PricingCatalog {
   estimate(args: EstimateArgs): CostEstimate {
     // Reduced once and passed down. A row needs the same struct for its cost,
     // its billed total, the prompt length a tier is selected against, and
-    // every card a cost interval is bounded by — recomputing it at each of
-    // those cost ~3x the whole hot path.
+    // every card a cost interval is bounded by; each of those used to reduce
+    // the raw counts again from scratch.
     const billed = billedTokens(args)
     const tokens = totalOfBilled(billed)
     const schedule = this.getSchedule(args.model)
     if (!schedule) {
       return { cost: 0, pricing: null, basis: 'flat', low: 0, high: 0, tokens }
     }
-    const { rates, basis, cards, tierAbove } = this.ratesForMemo(schedule, args, this.promptTokensFor(args, billed))
+    const resolved = this.ratesForMemo(schedule, args, this.factsFor(args, billed))
+    const { rates, basis, cards } = resolved
     const cost = costFromBilled(rates, billed)
     // Every card this row could have been charged at, priced against the same
     // counts: the ends of a blend, and any long-context tier the caller did
@@ -712,7 +734,7 @@ export class PricingCatalog {
         }
       }
     }
-    return { cost, pricing: this.priceCardFor(schedule, rates, tierAbove), basis, low, high, tokens }
+    return { cost, pricing: this.priceCardFor(schedule, resolved), basis, low, high, tokens }
   }
 
   /**

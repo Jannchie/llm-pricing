@@ -178,6 +178,44 @@ function quoted(rate: number | undefined): number | undefined {
 }
 
 /**
+ * The thinking-mode card a models.dev cost block declares, or undefined.
+ *
+ * `cost.reasoning` carries two incompatible meanings upstream, and the data
+ * itself separates them — no provider list required:
+ *
+ * - **Dearer than output (23 listings, every one a qwen model).** Alibaba's
+ *   thinking-mode output price, which its own table heads 思维链+回答 — chain
+ *   of thought AND answer. It replaces the card for the whole response, which
+ *   is exactly what this returns. `qwen-plus` is $1.2/MTok of output normally
+ *   and $4 in thinking mode; models.dev's figures match Alibaba's published
+ *   table to the cent for both its regions.
+ * - **Cheaper than output (6 listings, all of one model).** Perplexity's
+ *   `sonar-deep-research` bills reasoning tokens at $3/MTok *in addition to*
+ *   $8/MTok output. Treating that as a replacement would price a whole
+ *   response at $3 and undercharge by 62%, so it is ignored — a per-token
+ *   reasoning rate is a fifth priced quantity this package does not model, and
+ *   ignoring it undercharges only the reasoning tokens.
+ *
+ * `reasoning: 0` (17 listings, all one router's placeholder ids) is rejected by
+ * the same rule, which matters more than it looks: applied literally it would
+ * make thinking output free, turning the dearest requests into the cheapest.
+ *
+ * Only the output rate moves. Alibaba charges the same input rate either way,
+ * and `cost.reasoning` is a single number with nothing to say about the rest of
+ * the card.
+ */
+export function reasoningRatesFrom(cost: ModelsDevCost, base: Rates, divisor: number): Rates | undefined {
+  const { reasoning, output } = cost
+  if (typeof reasoning !== 'number' || !Number.isFinite(reasoning) || typeof output !== 'number') {
+    return undefined
+  }
+  if (!(reasoning > output)) {
+    return undefined
+  }
+  return { ...base, outputCostPerToken: reasoning / divisor }
+}
+
+/**
  * The long-context tiers a models.dev cost block declares, ascending.
  *
  * Only `type: 'context'` is read. A tier's threshold is a **prompt** length,
@@ -202,7 +240,14 @@ export function contextTiersFrom(cost: ModelsDevCost, divisor: number): ContextT
     if (!isUsableCost(tier)) {
       continue
     }
-    tiers.push({ abovePromptTokens: size, rates: tierRatesFrom(cost, tier, divisor) })
+    const rates = tierRatesFrom(cost, tier, divisor)
+    tiers.push({
+      abovePromptTokens: size,
+      rates,
+      // A tier's own thinking rate if it states one — none do upstream today,
+      // but Alibaba's published table prices both axes, so the shape allows it.
+      reasoningRates: reasoningRatesFrom(tier, rates, divisor),
+    })
   }
   if (tiers.length === 0) {
     return undefined
@@ -220,7 +265,8 @@ export function contextTiersFrom(cost: ModelsDevCost, divisor: number): ContextT
  * Long-context tiers are read from `cost.tiers`. The older
  * `context_over_200k` field is ignored: it is a redundant restatement of the
  * same numbers with the threshold baked into the key, and reading both would
- * risk quoting one model two thresholds.
+ * risk quoting one model two thresholds. `cost.reasoning` becomes a
+ * thinking-mode card where it means one — see `reasoningRatesFrom`.
  */
 export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevOptions = {}): Map<string, PriceSchedule> {
   const priority = options.providerPriority ?? DEFAULT_PROVIDER_PRIORITY
@@ -246,6 +292,7 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
       if (!isUsableCost(cost)) {
         continue
       }
+      const rates = ratesFromCost(cost, 1e6)
       const schedule: PriceSchedule = {
         displayName: typeof model.name === 'string' ? model.name : undefined,
         source: 'modelsdev',
@@ -253,7 +300,8 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
         tier: rank.has(providerId) ? 0 : 1,
         periods: [{
           from: Number.NEGATIVE_INFINITY,
-          rates: ratesFromCost(cost, 1e6),
+          rates,
+          reasoningRates: reasoningRatesFrom(cost, rates, 1e6),
           contextTiers: contextTiersFrom(cost, 1e6),
         }],
       }

@@ -28,7 +28,7 @@ Multiplying tokens by a price is easy. Everything around it is not:
 
 - **The model name in your database is not the name in any price list.** Agent CLIs store `claude-opus-4-7`, `claude-haiku-4-5-20251001`, `gpt-5.5(xhigh)`, `deepseek-deepseek-v4-pro`. Catalogues use `anthropic/claude-opus-4.7`. Gateways and hosted platforms add another layer on top: `anthropic.claude-opus-4-5-20250514-v1:0` (Bedrock), `claude-opus-4-5@20250514` (Vertex), `publishers/anthropic/models/...`, `z-ai/glm-4.6:nitro`, `together_ai/deepseek-ai/DeepSeek-V3`. All of it is normalized — probing exact keys only, so a bad guess misses instead of mispricing. `:free` is deliberately left unresolved rather than billed at the paid rate.
 - **Cache tokens are most of the bill and are priced four different ways.** Fresh input, cache creation (5m vs 1h TTL, the latter at 2× input), and cache read all differ by up to 100×. Providers that only report `cached_input_tokens` need their cache reads derived, or ~90% of Codex input gets billed at the full prompt rate. Worse, whether those counts sit *inside* `inputTokens` or *beside* it is a property of whoever wrote the row rather than of the vendor — and guessing wrong bills every cached token at the full input rate, a ~10× overcharge. See [Token shapes](#token-shapes).
-- **A price is a schedule, not a number.** Vendors change rates, and history must not be re-priced. DeepSeek additionally bills peak and off-peak by UTC hour, and a request whose prompt clears 272k pays double for its whole length. All three dimensions are modelled; models with one flat rate — nearly all of them — short-circuit and pay nothing for the machinery. See [Long-context tiers](#long-context-tiers).
+- **A price is a schedule, not a number.** Vendors change rates, and history must not be re-priced. DeepSeek additionally bills peak and off-peak by UTC hour, a request whose prompt clears 272k pays double for its whole length, and Alibaba charges a request that reasoned over 3× as much per output token. All four dimensions are modelled; models with one flat rate — nearly all of them — short-circuit and pay nothing for the machinery. See [Long-context tiers](#long-context-tiers) and [Thinking mode](#thinking-mode).
 - **Catalogues quote resellers.** The same model id is listed by 15–25 providers at their own margin, some at a placeholder $0. Getting first-party rates requires deliberate provider priority.
 
 ## Data sources
@@ -164,6 +164,28 @@ Declaring the grain closes the interval to a point, so `high / cost` on a total 
 
 **Tiers are historical too.** Anthropic's own >200k premium — $6/$22.50 on Sonnet 4/4.5 against a $3/$15 list — existed until 2026-03-13 and was then withdrawn; every current first-party Claude model prices the full 1M window flat. That is why a tier lives inside a `PricePeriod` rather than beside the schedule: a model has to be able to carry one for its old periods and none for its new ones. The archive backfilled the tiers it learned about into their existing periods rather than dating them at the sync, since those rates were in force before this package recorded them — a one-time migration, after which a newly-appearing tier reads as a vendor introducing a premium and gets its own period.
 
+## Thinking mode
+
+Alibaba charges a request that reasoned at a dearer card, for its **whole response**: `qwen-plus` bills output at $1.2/MTok normally and $4/MTok in thinking mode, under a column its own [pricing table](https://www.alibabacloud.com/help/zh/model-studio/model-pricing) heads 思维链+回答 — "chain of thought AND answer". So it is not a price for reasoning tokens; it replaces the card. 9 models in the bundled archive carry one.
+
+It rides the same `perRequest` gate as a long-context tier, for the same reason — a sum of thinking and non-thinking requests cannot be attributed to either card — and the signal is the row's own reasoning count:
+
+```ts
+// Thinking is detected from `reasoningOutputTokens > 0`, on either side of
+// `reasoningIncludedInOutput`. Nothing to declare beyond the grain.
+estimateCostUsd({ model: 'qwen-plus', perRequest: true, reasoningOutputTokens: 15_000, ...tokens })
+
+// Aggregated: base card, with `high` reporting what thinking would have cost.
+estimateCostUsd({ model: 'qwen-plus', ...tokens })
+
+// What a thinking request would be charged, for display:
+getPriceFor('qwen-plus', undefined, { usedReasoning: true })
+```
+
+`pricing.reasoningMode` says which card applied, and `sumEstimates` keys on it, so a workload mixing thinking and non-thinking requests reports two entries in `total.cards` rather than one averaged rate.
+
+**It composes with a context tier rather than competing with one.** The variant hangs off each *card*, not off the period, so a tier carries its own thinking rate — which is what Alibaba's Beijing table actually publishes (a 128k–256k prompt costs $2.868/MTok of output normally and $3.441 thinking). No upstream model states both today, but the shape holds the vendor's truth rather than upstream's current view of it.
+
 ## Time-aware pricing
 
 Pass `at` when you know the instant the tokens were spent, `window` when the row is a sum over a range:
@@ -209,7 +231,7 @@ Five entry points cover essentially every use:
 | `estimateCostUsd(args)` | Token counts → `{ cost, low, high, pricing, basis, tokens }` |
 | `estimateCostFromRow(row, options?)` | The same, straight off a snake_case SQL row |
 | `sumEstimates(estimates)` | Fold many into a total that keeps provenance |
-| `getPriceFor(model, at?, promptTokens?)` | Just the rate card, no token counts |
+| `getPriceFor(model, at?, facts?)` | Just the rate card, no token counts |
 
 <details>
 <summary>Everything else</summary>
@@ -269,7 +291,8 @@ total.cards // every rate that contributed, with how much each did
 
 - **Long-context tiers need `perRequest`.** They are modelled and priced (see [Long-context tiers](#long-context-tiers)), but only for rows the caller declares to be a single request. An aggregated row cannot say whether any individual request crossed a threshold, so it stays on the base card — and reports `high` as what the tier would have cost, rather than claiming the base rate was certainly charged.
 - **A withdrawn tier is only archived from the day it was noticed.** Anthropic's pre-2026-03-13 >200k premium on Sonnet 4/4.5 is not in the archive: upstream publishes today's prices, and when a premium is withdrawn the tier disappears from the feed along with its history. Pricing those rows correctly needs a hand-written override with the right effective window.
-- **A separate reasoning-token rate is not applied.** models.dev publishes `cost.reasoning` on 143 models, 41 of which quote it differently from output — but not with one meaning. On Alibaba's 9 first-party thinking models it is the *output* rate for a request that used thinking (qwen-plus: $1.2/MTok plain, $4 thinking), so it applies to every output token of such a request; on Perplexity's `sonar-deep-research` it is cheaper than output and reads as a per-reasoning-token rate. Billing either reading would be wrong for the other, so reasoning is billed at the output rate, which undercharges Alibaba's thinking traffic by up to 3.3× on the output side. Modelling it properly needs a per-request "reasoning mode" card, the same shape as a context tier.
+- **A per-reasoning-token rate is not applied.** Perplexity's `sonar-deep-research` bills reasoning tokens at $3/MTok *in addition to* $8/MTok of output, and that fifth priced quantity is not modelled — those tokens are billed at the output rate instead. Alibaba's thinking pricing is a different thing and *is* modelled; see [Thinking mode](#thinking-mode).
+- **Alibaba's own context tiers are missing upstream.** Its published table puts `qwen-plus` on tiers (Singapore above 256K; Beijing at 128K/256K/1M, where the output rate jumps 10× at the first step), but models.dev publishes no `cost.tiers` for any first-party Alibaba model — while resellers such as OpenRouter and DeepInfra publish them for the same models. Since first-party listings win the bare-name index, long qwen requests are priced at the short-request rate. Correcting it needs a hand-written override per model and region.
 - **Batch, priority and committed-throughput discounts are not modelled.** Nor is the 1.1× `inference_geo: "us"` / regional-endpoint multiplier. Upstream has no price for any of them: models.dev's `service_tier: "priority"` appears only as a request-body hint under `experimental.modes`, with no rate attached, which is why the fast/priority multipliers are hand-maintained (see [What stays hand-maintained](#what-stays-hand-maintained-and-why)).
 - **A blend weights by wall-clock time, not by usage.** Rows summed over a window no longer say which hours their tokens were spent in, so `blended` assumes they were spread evenly. Measured against a real store's DeepSeek traffic, 27.45% of tokens landed in peak hours against the 29.17% a uniform day implies — a 1.35% overstatement there, but the bound is the full [off-peak, peak] interval, which `low`/`high` now report rather than leave implicit. Group by UTC hour to remove the assumption entirely.
 - **Token nesting cannot be inferred from the model.** Which counts contain which is a property of the producer, and for reasoning not even a constant one. `inferShape` recovers the output side from a row's own total; the input side is genuinely unrecoverable and has to be declared. See [Token shapes](#token-shapes).

@@ -1,5 +1,6 @@
 import type { EstimateArgs, PricingCatalogOptions, PricingCatalogState } from './catalog'
 import type { RowOptions } from './row'
+import type { RequestFacts } from './schedule'
 import type { CostEstimate, ModelPrice, TimeInput } from './types'
 import { PricingCatalog } from './catalog'
 
@@ -17,10 +18,11 @@ export { SNAPSHOT_SYNCED_AT, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 export type { ParseModelsDevOptions } from './catalog/modelsdev'
 export { DEFAULT_PROVIDER_PRIORITY } from './catalog/modelsdev'
 export type { TokenCounts } from './estimate'
-export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates, promptTokensBilled, tokensBilled } from './estimate'
+export { CACHE_CREATE_1H_INPUT_MULTIPLIER, costFromRates, promptTokensBilled, tokensBilled, usedReasoning } from './estimate'
 export { pricingCandidates } from './resolve'
 export type { RowColumns, RowOptions, TokenShape } from './row'
 export { DEFAULT_ROW_COLUMNS, inferTokenShape, PRICE_ANCHOR_COLUMN } from './row'
+export type { RequestFacts } from './schedule'
 export type { PricingSource } from './sources'
 export { modelsDevSource, openRouterSource } from './sources'
 export type { CostTotal } from './total'
@@ -34,6 +36,7 @@ export type {
   PricePeriod,
   PriceSchedule,
   PriceSource,
+  RateCard,
   RateKey,
   Rates,
   TimeInput,
@@ -106,8 +109,8 @@ export function pricingState(): PricingCatalogState {
 }
 
 /** See `PricingCatalog#getPrice`. */
-export function getPriceFor(model: string, at?: TimeInput, promptTokens?: number): ModelPrice | null {
-  return getDefaultCatalog().getPrice(model, at, promptTokens)
+export function getPriceFor(model: string, at?: TimeInput, facts?: RequestFacts): ModelPrice | null {
+  return getDefaultCatalog().getPrice(model, at, facts)
 }
 
 /** See `PricingCatalog#estimate`. */

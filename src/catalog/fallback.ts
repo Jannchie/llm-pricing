@@ -43,13 +43,17 @@ function toTier([above, input, cacheWrite, cacheRead, output]: SnapshotTier): Co
   return { abovePromptTokens: above, rates: toRates(input, cacheWrite, cacheRead, output) }
 }
 
-function toPeriod([from, input, cacheWrite, cacheRead, output, tiers]: SnapshotPeriod): PricePeriod {
+function toPeriod([from, input, cacheWrite, cacheRead, output, tiers, reasoningOutput]: SnapshotPeriod): PricePeriod {
+  const rates = toRates(input, cacheWrite, cacheRead, output)
   return {
     from: from === null ? Number.NEGATIVE_INFINITY : Date.parse(`${from}T00:00:00Z`),
-    rates: toRates(input, cacheWrite, cacheRead, output),
-    // Absent on every period archived before tiers were recorded, which is
-    // the honest reading: those rows were observed as one flat rate.
-    contextTiers: tiers?.map(toTier),
+    rates,
+    // Both absent on every period archived before the dimension was recorded,
+    // which is the honest reading: those rows were observed as one flat rate.
+    contextTiers: tiers?.map(toTier) ?? undefined,
+    reasoningRates: reasoningOutput === undefined
+      ? undefined
+      : { ...rates, outputCostPerToken: reasoningOutput / 1e6 },
   }
 }
 
