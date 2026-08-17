@@ -22,6 +22,9 @@ jobs:
   # The library's own work, on both the floor `package.json` declares and a
   # current release — so a syntax or API level that needs newer fails here
   # rather than in a consumer's runtime.
+  #
+  # Typecheck and tests only. The bundler is toolchain, and it does not run on
+  # the floor either (see `bundle`).
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -46,14 +49,13 @@ jobs:
 
       - run: pnpm run test
 
-      - run: pnpm run build
-
-  # Separate, and deliberately NOT on the floor: the shared eslint config
-  # reaches `Object.groupBy`, which needs Node 21+. That is a constraint on
-  # this repo's dev toolchain, not on the library — consumers never run it —
-  # so pinning lint to the declared floor only fails the build for a reason
-  # no user can encounter.
-  lint:
+  # Lint and bundle, deliberately NOT on the declared floor. Both tools need
+  # newer Node than the library does — the shared eslint config reaches
+  # `Object.groupBy` (Node 21+), and tsdown cannot import `unrun` on 20. Those
+  # are constraints on this repo's toolchain, not on the package: consumers
+  # never run either, and `release.yml` builds on 22. Pinning them to the floor
+  # only fails the build for a reason no user can encounter.
+  bundle:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -72,3 +74,5 @@ jobs:
       # `pnpm lint` is `eslint --fix`, which would report success after
       # rewriting the tree. `--no-fix` is what actually asks a question.
       - run: pnpm exec eslint . --no-fix
+
+      - run: pnpm run build
