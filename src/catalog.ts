@@ -1,5 +1,5 @@
 import type { PricingCache } from './cache'
-import type { TokenCounts } from './estimate'
+import type { BilledTokens, TokenCounts } from './estimate'
 import type { RowOptions } from './row'
 import type { ResolvedRates } from './schedule'
 import type { PricingSource } from './sources'
@@ -7,7 +7,7 @@ import type { CostEstimate, ModelPrice, NormalizedSchedule, PriceSchedule, Rates
 import { decodeCacheEntry, encodeCacheEntry } from './cache'
 import { FALLBACK, FAST_BY_ID, scaleSchedule, SNAPSHOT_SYNCED_AT_MS } from './catalog/fallback'
 import { OVERRIDES } from './catalog/overrides'
-import { costFromRates, promptTokensBilled, tokensBilled } from './estimate'
+import { billedTokens, costFromBilled, promptOfBilled, totalOfBilled } from './estimate'
 import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
 import { pricingCandidates } from './resolve'
@@ -584,12 +584,12 @@ export class PricingCatalog {
    * `promptTokens` implies `perRequest`: a caller who states the prompt
    * length has necessarily told us the row describes one prompt.
    */
-  private promptTokensFor(args: EstimateArgs): number | undefined {
+  private promptTokensFor(args: EstimateArgs, billed: BilledTokens): number | undefined {
     if (args.promptTokens !== undefined) {
       const n = Number(args.promptTokens)
       return Number.isFinite(n) && n > 0 ? n : 0
     }
-    return args.perRequest ? promptTokensBilled(args) : undefined
+    return args.perRequest ? promptOfBilled(billed) : undefined
   }
 
   private ratesForMemo(schedule: NormalizedSchedule, args: EstimateArgs, promptTokens: number | undefined): ResolvedRates {
@@ -676,13 +676,18 @@ export class PricingCatalog {
    * distinction away along with the basis and the cards.
    */
   estimate(args: EstimateArgs): CostEstimate {
-    const tokens = tokensBilled(args)
+    // Reduced once and passed down. A row needs the same struct for its cost,
+    // its billed total, the prompt length a tier is selected against, and
+    // every card a cost interval is bounded by — recomputing it at each of
+    // those cost ~3x the whole hot path.
+    const billed = billedTokens(args)
+    const tokens = totalOfBilled(billed)
     const schedule = this.getSchedule(args.model)
     if (!schedule) {
       return { cost: 0, pricing: null, basis: 'flat', low: 0, high: 0, tokens }
     }
-    const { rates, basis, cards, tierAbove } = this.ratesForMemo(schedule, args, this.promptTokensFor(args))
-    const cost = costFromRates(rates, args)
+    const { rates, basis, cards, tierAbove } = this.ratesForMemo(schedule, args, this.promptTokensFor(args, billed))
+    const cost = costFromBilled(rates, billed)
     // Every card this row could have been charged at, priced against the same
     // counts: the ends of a blend, and any long-context tier the caller did
     // not rule out. These are reachable prices rather than a nominal error
@@ -693,7 +698,12 @@ export class PricingCatalog {
     let high = cost
     if (cards) {
       for (const card of cards) {
-        const bound = costFromRates(card, args)
+        // The card that was actually applied is in here whenever a blend
+        // averaged it, and pricing it again would only reproduce `cost`.
+        if (card === rates) {
+          continue
+        }
+        const bound = costFromBilled(card, billed)
         if (bound < low) {
           low = bound
         }

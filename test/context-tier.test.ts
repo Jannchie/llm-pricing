@@ -40,34 +40,54 @@ function tiered(overrides: Partial<PriceSchedule> = {}): PricingCatalog {
   return new PricingCatalog({ sources: [], overrides: { 'gpt-5.5': { ...GPT_55, ...overrides } } })
 }
 
+// What a 400k-prompt, 1000-output request costs on `GPT_55`, at each card.
+const LONG_COUNTS = { inputTokens: 400_000, cachedInputTokens: 0, outputTokens: 1000 }
+const LONG_ON_BASE = 400_000 * 5e-6 + 1000 * 30e-6
+const LONG_ON_TIER = 400_000 * 10e-6 + 1000 * 45e-6
+
+// Anthropic's own >200k premium existed until 2026-03-13 and was then
+// withdrawn — the case that forces tiers to live inside a period.
+//
+// Module-scoped because "one period tiered, one not" is the shape every test
+// of tiers against the time axis needs, and a second fixture saying the same
+// thing with different numbers is two places to update when tier semantics
+// move.
+const WITHDRAWN_AT = Date.UTC(2026, 2, 13)
+const withdrawn: PriceSchedule = {
+  displayName: 'Claude Sonnet 4.5',
+  source: 'override',
+  sqlMatch: ['%sonnet%'],
+  periods: [
+    {
+      from: Number.NEGATIVE_INFINITY,
+      rates: rates(3, 15, 0.3, 3.75),
+      contextTiers: [{ abovePromptTokens: 200_000, rates: rates(6, 22.5, 0.6, 7.5) }],
+    },
+    { from: WITHDRAWN_AT, rates: rates(3, 15, 0.3, 3.75) },
+  ],
+}
+
+function withdrawnCatalog(): PricingCatalog {
+  return new PricingCatalog({ sources: [], overrides: { 'claude-sonnet-4-5': withdrawn } })
+}
+
 describe('selecting a long-context tier', () => {
   const catalog = tiered()
 
   it('leaves an aggregated row on the base card', () => {
     // 400k of input in one row, but nothing says it was one request — ten
     // 40k requests look identical here, and none of those crossed 272k.
-    const { cost, pricing } = catalog.estimate({
-      model: 'gpt-5.5',
-      inputTokens: 400_000,
-      cachedInputTokens: 0,
-      outputTokens: 1000,
-    })
+    const { cost, pricing } = catalog.estimate({ model: 'gpt-5.5', ...LONG_COUNTS })
     expect(pricing?.contextTierAbove).toBeUndefined()
-    expect(cost).toBeCloseTo(400_000 * 5e-6 + 1000 * 30e-6, 10)
+    expect(cost).toBeCloseTo(LONG_ON_BASE, 10)
   })
 
   it('applies the tier once the caller states the row is one request', () => {
-    const { cost, pricing } = catalog.estimate({
-      model: 'gpt-5.5',
-      inputTokens: 400_000,
-      cachedInputTokens: 0,
-      outputTokens: 1000,
-      perRequest: true,
-    })
+    const { cost, pricing } = catalog.estimate({ model: 'gpt-5.5', ...LONG_COUNTS, perRequest: true })
     expect(pricing?.contextTierAbove).toBe(272_000)
     // Output is billed at the tier rate even though it never counted toward
     // the threshold.
-    expect(cost).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+    expect(cost).toBeCloseTo(LONG_ON_TIER, 10)
   })
 
   it('treats the threshold as strictly greater than', () => {
@@ -171,20 +191,19 @@ describe('selecting a long-context tier', () => {
 
 describe('what an undeclared row admits it does not know', () => {
   const catalog = tiered()
-  const counts = { inputTokens: 400_000, cachedInputTokens: 0, outputTokens: 1000 }
 
   it('bounds an aggregated row by the tier it could not rule out', () => {
     // The defect this replaces: `low === high === cost` on the base card,
     // which says "one card was possible" about a model where two are.
-    const { cost, low, high } = catalog.estimate({ model: 'gpt-5.5', ...counts })
+    const { cost, low, high } = catalog.estimate({ model: 'gpt-5.5', ...LONG_COUNTS })
     expect(low).toBeCloseTo(cost, 12)
-    expect(high).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+    expect(high).toBeCloseTo(LONG_ON_TIER, 10)
     expect(high / cost).toBeCloseTo(1.99, 2)
   })
 
   it('closes the interval once the caller states the grain', () => {
     for (const args of [{ perRequest: true }, { perRequest: true, promptTokens: 1000 }]) {
-      const { cost, low, high } = catalog.estimate({ model: 'gpt-5.5', ...counts, ...args })
+      const { cost, low, high } = catalog.estimate({ model: 'gpt-5.5', ...LONG_COUNTS, ...args })
       expect(low).toBeCloseTo(cost, 12)
       expect(high).toBeCloseTo(cost, 12)
     }
@@ -194,55 +213,53 @@ describe('what an undeclared row admits it does not know', () => {
     const flat = new PricingCatalog({ sources: [], overrides: {
       m: { displayName: 'M', source: 'override', periods: [{ from: Number.NEGATIVE_INFINITY, rates: rates(5, 30) }] },
     } })
-    const { cost, low, high } = flat.estimate({ model: 'm', ...counts })
+    const { cost, low, high } = flat.estimate({ model: 'm', ...LONG_COUNTS })
     expect(low).toBe(cost)
     expect(high).toBe(cost)
   })
 
-  // A model that both moved its price and prices by prompt size, so the two
-  // time paths (`at` and `window`) are reachable with tiers in play.
-  const changed = Date.UTC(2026, 5, 1)
-  const TIER = { abovePromptTokens: 272_000, rates: rates(10, 45, 1) }
-  const historic = new PricingCatalog({ sources: [], overrides: {
-    'gpt-5.5': {
-      displayName: 'GPT-5.5',
-      source: 'override',
-      sqlMatch: ['%gpt-5.5%'],
-      periods: [
-        { from: Number.NEGATIVE_INFINITY, rates: rates(5, 30, 0.5) },
-        { from: changed, rates: rates(5, 30, 0.5), contextTiers: [TIER] },
-      ],
-    },
-  } })
+  // The two time paths (`at` and `window`) against a schedule where only one
+  // period is tiered — reusing the withdrawn-premium fixture rather than
+  // building a mirror of it.
+  const sonnet = withdrawnCatalog()
+  const onTier = 400_000 * 6e-6 + 1000 * 22.5e-6
 
   it('bounds an exact instant too, since knowing when says nothing about how long', () => {
-    const { cost, low, high, basis } = historic.estimate({ model: 'gpt-5.5', ...counts, at: changed + DAY_MS })
+    const { cost, low, high, basis } = sonnet.estimate({
+      model: 'claude-sonnet-4-5',
+      ...LONG_COUNTS,
+      at: WITHDRAWN_AT - DAY_MS,
+    })
     expect(basis).toBe('exact')
     expect(low).toBeCloseTo(cost, 12)
-    expect(high).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+    expect(high).toBeCloseTo(onTier, 10)
   })
 
   it('claims nothing extra at an instant whose period has no tier', () => {
-    const { cost, low, high } = historic.estimate({ model: 'gpt-5.5', ...counts, at: changed - DAY_MS })
+    const { cost, low, high } = sonnet.estimate({
+      model: 'claude-sonnet-4-5',
+      ...LONG_COUNTS,
+      at: WITHDRAWN_AT + DAY_MS,
+    })
     expect(low).toBe(cost)
     expect(high).toBe(cost)
   })
 
   it('bounds a blend by the tiers of every period the window drew on', () => {
-    const { cost, low, high, basis } = historic.estimate({
-      model: 'gpt-5.5',
-      ...counts,
-      window: [changed - 30 * DAY_MS, changed + 30 * DAY_MS],
+    const { cost, low, high, basis } = sonnet.estimate({
+      model: 'claude-sonnet-4-5',
+      ...LONG_COUNTS,
+      window: [WITHDRAWN_AT - 30 * DAY_MS, WITHDRAWN_AT + 30 * DAY_MS],
     })
     expect(basis).toBe('blended')
     // The base rate never moved, so the blend itself is not what widens this.
     expect(low).toBeCloseTo(cost, 12)
-    expect(high).toBeCloseTo(400_000 * 10e-6 + 1000 * 45e-6, 10)
+    expect(high).toBeCloseTo(onTier, 10)
   })
 
   it('sums the interval across a mixed workload', () => {
-    const undeclared = catalog.estimate({ model: 'gpt-5.5', ...counts })
-    const declared = catalog.estimate({ model: 'gpt-5.5', ...counts, perRequest: true })
+    const undeclared = catalog.estimate({ model: 'gpt-5.5', ...LONG_COUNTS })
+    const declared = catalog.estimate({ model: 'gpt-5.5', ...LONG_COUNTS, perRequest: true })
     const total = sumEstimates([undeclared, declared])
     // Both rows' floors are what they were costed at, so only the ceiling
     // moves — the total is exact about the declared row and open about the
@@ -254,24 +271,7 @@ describe('what an undeclared row admits it does not know', () => {
 })
 
 describe('tiers alongside the time dimensions', () => {
-  // Anthropic's own >200k premium existed until 2026-03-13 and was then
-  // withdrawn — the case that forces tiers to live inside a period.
-  const WITHDRAWN_AT = Date.UTC(2026, 2, 13)
-  const withdrawn: PriceSchedule = {
-    displayName: 'Claude Sonnet 4.5',
-    source: 'override',
-    sqlMatch: ['%sonnet%'],
-    periods: [
-      {
-        from: Number.NEGATIVE_INFINITY,
-        rates: rates(3, 15, 0.3, 3.75),
-        contextTiers: [{ abovePromptTokens: 200_000, rates: rates(6, 22.5, 0.6, 7.5) }],
-      },
-      { from: WITHDRAWN_AT, rates: rates(3, 15, 0.3, 3.75) },
-    ],
-  }
-
-  const catalog = new PricingCatalog({ sources: [], overrides: { 'claude-sonnet-4-5': withdrawn } })
+  const catalog = withdrawnCatalog()
   const long = {
     model: 'claude-sonnet-4-5',
     inputTokens: 400_000,

@@ -1,6 +1,7 @@
+import type { Rates } from '../types'
 import type { ModelsDevCost, ModelsDevResponse } from './modelsdev'
 import { closeEnough } from '../rates'
-import { cacheRatesFrom, contextTiersFrom, isUsableCost } from './modelsdev'
+import { contextTiersFrom, isUsableCost, ratesFromCost } from './modelsdev'
 
 /**
  * The merge behind `pnpm sync`, separated from the script so it can be
@@ -66,21 +67,38 @@ function sameRates(a: readonly number[], b: readonly number[]): boolean {
  * held steady has to read as a reprice, or the archive keeps yesterday's
  * long-context rate forever.
  */
-function archivedRates(cost: ModelsDevCost): { base: [number, number, number, number], tiers: SnapshotTier[] } {
-  const { cacheRead, cacheWrite } = cacheRatesFrom(cost, 1)
-  // Read through the same function the live index uses, rather than a second
-  // copy of the same filtering and defaulting. The two had already drifted
-  // once by construction: a rule that only the live path applied would let a
-  // quote it corrects be archived uncorrected, and then the archive is what
-  // answers whenever the network is down.
-  const tiers = (contextTiersFrom(cost, 1) ?? []).map(({ abovePromptTokens, rates }): SnapshotTier => [
-    abovePromptTokens,
+function archivedRates(cost: ModelsDevCost): { base: ArchivedRates, tiers: SnapshotTier[] } {
+  // Both halves read through the same functions the live index uses, rather
+  // than a second copy of the filtering and defaulting. The two had already
+  // drifted once by construction: a rule that only the live path applied
+  // would let a quote it corrects be archived uncorrected, and the archive is
+  // what answers whenever the network is down.
+  return {
+    base: flatten(ratesFromCost(cost, 1)),
+    tiers: (contextTiersFrom(cost, 1) ?? []).map(
+      ({ abovePromptTokens, rates }): SnapshotTier => [abovePromptTokens, ...flatten(rates)],
+    ),
+  }
+}
+
+/** The four rates a period tuple carries, in the order it carries them. */
+type ArchivedRates = [input: number, cacheWrite: number, cacheRead: number, output: number]
+
+/**
+ * `Rates` in archive-tuple order — which is NOT the order `Rates` declares
+ * them in: cache *write* comes before cache read on disk. Written once so a
+ * base row and a tier row cannot encode it differently; getting it wrong in
+ * one of two places would silently swap the two cache prices, and
+ * `sameRates` compares the same two positions on both sides, so nothing
+ * would notice.
+ */
+function flatten(rates: Rates): ArchivedRates {
+  return [
     rates.inputCostPerToken,
     rates.cacheCreationInputCostPerToken,
     rates.cacheReadInputCostPerToken,
     rates.outputCostPerToken,
-  ])
-  return { base: [cost.input!, cacheWrite, cacheRead, cost.output!], tiers }
+  ]
 }
 
 /** Flatten a period's rates for comparison, tiers included. */

@@ -85,9 +85,16 @@ function count(value: unknown): number {
  *
  * Split out so `costFromRates` and `tokensBilled` cannot disagree about
  * what was billed — a total that contradicts the cost beside it is worse
- * than no total at all. The object never escapes either caller.
+ * than no total at all.
+ *
+ * Exported (module-internally: not part of the package's public API) because
+ * a single row needs this same struct several times over — for its cost, for
+ * its billed total, for the prompt length a tier is selected against, and
+ * once more for each card a cost interval is bounded by. Deriving it once and
+ * passing it down is worth ~3x on the hot path over letting each of those
+ * recompute it from the raw counts.
  */
-interface BilledTokens {
+export interface BilledTokens {
   fresh: number
   creationDefault: number
   creation1h: number
@@ -95,7 +102,7 @@ interface BilledTokens {
   output: number
 }
 
-function billedTokens(tokens: TokenCounts): BilledTokens {
+export function billedTokens(tokens: TokenCounts): BilledTokens {
   // The splits are subsets of the total, so a row carrying splits but no
   // total is still describing creation tokens — reading the total alone
   // bills every one of them at zero.
@@ -152,7 +159,14 @@ function billedTokens(tokens: TokenCounts): BilledTokens {
  * made by the time this runs, which is what makes it exhaustively testable.
  */
 export function costFromRates(rates: Rates, tokens: TokenCounts): number {
-  const b = billedTokens(tokens)
+  return costFromBilled(rates, billedTokens(tokens))
+}
+
+/**
+ * `costFromRates` for counts that have already been reduced. The arithmetic
+ * lives here so the two cannot drift apart.
+ */
+export function costFromBilled(rates: Rates, b: BilledTokens): number {
   return b.fresh * rates.inputCostPerToken
     + b.creationDefault * rates.cacheCreationInputCostPerToken
     + b.creation1h * rates.inputCostPerToken * CACHE_CREATE_1H_INPUT_MULTIPLIER
@@ -175,7 +189,11 @@ export function costFromRates(rates: Rates, tokens: TokenCounts): number {
  * `estimate` consults it only under `perRequest`.
  */
 export function promptTokensBilled(tokens: TokenCounts): number {
-  const b = billedTokens(tokens)
+  return promptOfBilled(billedTokens(tokens))
+}
+
+/** `promptTokensBilled` for counts that have already been reduced. */
+export function promptOfBilled(b: BilledTokens): number {
   return b.fresh + b.creationDefault + b.creation1h + b.cacheRead
 }
 
@@ -188,6 +206,10 @@ export function promptTokensBilled(tokens: TokenCounts): number {
  * which is what makes an unpriced row's $0 legible as a gap.
  */
 export function tokensBilled(tokens: TokenCounts): number {
-  const b = billedTokens(tokens)
-  return b.fresh + b.creationDefault + b.creation1h + b.cacheRead + b.output
+  return totalOfBilled(billedTokens(tokens))
+}
+
+/** `tokensBilled` for counts that have already been reduced. */
+export function totalOfBilled(b: BilledTokens): number {
+  return promptOfBilled(b) + b.output
 }

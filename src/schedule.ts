@@ -38,13 +38,28 @@ export function isTimeSensitive(schedule: PriceSchedule): boolean {
  * key for the ~97% of models with no tiers, where it cannot change the
  * answer.
  */
+const HAS_TIERS = new WeakMap<PriceSchedule, boolean>()
+
 export function hasContextTiers(schedule: PriceSchedule): boolean {
+  // Memoised on the schedule: this is read once per priced row to decide
+  // whether prompt length belongs in a memo key, while being a pure function
+  // of a table the catalogue holds for its lifetime. A weak key keeps that
+  // bounded by the catalogue rather than by traffic, and — unlike a flag on
+  // the object — does not mutate a table `normalizeSchedule` hands back by
+  // identity.
+  const known = HAS_TIERS.get(schedule)
+  if (known !== undefined) {
+    return known
+  }
+  let found = false
   for (const period of schedule.periods) {
     if (period.contextTiers && period.contextTiers.length > 0) {
-      return true
+      found = true
+      break
     }
   }
-  return false
+  HAS_TIERS.set(schedule, found)
+  return found
 }
 
 export function periodAt(schedule: NormalizedSchedule, atMs: number): PricePeriod {
@@ -158,8 +173,8 @@ function weightedPeriods(
 }
 
 /**
- * Bound cards for a period whose prompt length was never stated, memoised on
- * the period.
+ * The tier cards a period could still have charged, memoised on the period —
+ * empty unless the caller left the prompt length unstated.
  *
  * A row the caller has not declared per-request is priced at the base card,
  * which is the right single number — a sum cannot say whether any request
@@ -168,25 +183,31 @@ function weightedPeriods(
  * cost nearly twice as much. These are the cards those requests would have
  * paid, so the estimate can state the interval instead of hiding it.
  *
+ * The base card is deliberately NOT in here. Every caller has already priced
+ * it — it is either the card the resolution returned or one of the blend's
+ * own parts — so including it would make each of them either recompute a
+ * number they hold or trim an element by index, which is a layout of this
+ * array leaking into three call sites.
+ *
  * Memoised because `ratesFor`'s flat path runs once per priced row while this
  * array is a pure function of the period. Periods come from tables the
  * catalogue holds for its lifetime, so a weak key is bounded by the
  * catalogue rather than by traffic.
  */
-const BOUNDS_BY_PERIOD = new WeakMap<PricePeriod, Rates[]>()
+const TIER_CARDS_BY_PERIOD = new WeakMap<PricePeriod, Rates[]>()
 
-function tierBounds(period: PricePeriod, promptTokens: number | undefined): Rates[] | undefined {
+function tierCards(period: PricePeriod, promptTokens: number | undefined): Rates[] | undefined {
   // A stated prompt length selects one card and rules the rest out; there is
   // nothing left to bound.
-  if (promptTokens !== undefined || !period.contextTiers) {
+  if (promptTokens !== undefined || !period.contextTiers?.length) {
     return undefined
   }
-  let bounds = BOUNDS_BY_PERIOD.get(period)
-  if (!bounds) {
-    bounds = [period.rates, ...period.contextTiers.map(tier => tier.rates)]
-    BOUNDS_BY_PERIOD.set(period, bounds)
+  let cards = TIER_CARDS_BY_PERIOD.get(period)
+  if (!cards) {
+    cards = period.contextTiers.map(tier => tier.rates)
+    TIER_CARDS_BY_PERIOD.set(period, cards)
   }
-  return bounds
+  return cards
 }
 
 /**
@@ -222,8 +243,26 @@ export function blendParts(
   if (!(toMs > start)) {
     return [{ rates: ratesAt(schedule, start, promptTokens), weight: 1 }]
   }
+  // `parts` is never empty: the first period opens at -Infinity and
+  // `toMs > start` was checked above, so at least one segment has span.
+  return partsFor(weightedPeriods(schedule, start, toMs), promptTokens)
+}
+
+/**
+ * The weighted cards a set of already-clipped segments pays.
+ *
+ * Split from `blendParts` so `ratesFor` can walk the periods once and feed
+ * the same segments to all three things that need them — the weights, the
+ * tier claim, and the bound cards. Passing the walk around rather than
+ * repeating it is what actually makes them agree; two calls with matching
+ * arguments only makes them agree today.
+ */
+function partsFor(
+  segments: Array<{ period: PricePeriod, from: number, to: number }>,
+  promptTokens: number | undefined,
+): Array<{ rates: Rates, weight: number }> {
   const parts: Array<{ rates: Rates, weight: number }> = []
-  for (const { period, from, to } of weightedPeriods(schedule, start, toMs)) {
+  for (const { period, from, to } of segments) {
     const span = to - from
     if (period.peak) {
       const peakMs = peakMsBetween(period.peak.windowsUtc, from, to)
@@ -235,8 +274,6 @@ export function blendParts(
       parts.push({ rates: contextTierFor(period, promptTokens)?.rates ?? period.rates, weight: span })
     }
   }
-  // `parts` is never empty: the first period opens at -Infinity and
-  // `toMs > start` was checked above, so at least one segment has span.
   return parts
 }
 
@@ -273,6 +310,12 @@ export interface ResolvedRates {
    *
    * Absent when the resolution really did have exactly one possible card,
    * which is nearly every row.
+   *
+   * The invariant a consumer may rely on, whichever source filled it:
+   * `min(cards ∪ {cost}) <= cost <= max(cards ∪ {cost})`. Note it does not
+   * assume a tier is dearer than its base — two upstream listings quote one
+   * that is cheaper on output, and those land on the `low` side by
+   * themselves.
    */
   cards?: Rates[]
   /**
@@ -302,12 +345,19 @@ export function ratesFor(
     // stays 'flat': it describes how the *time* axis was resolved, and a
     // tiered flat schedule is still exact rather than averaged.
     const period = schedule.periods[0]!
+    // Ahead of everything else, because this is the hottest line in the
+    // package: ~97% of models have no tiers, and for those the whole prompt
+    // dimension cannot change the answer. Returning here keeps them on the
+    // same two-property result they had before tiers existed.
+    if (!period.contextTiers?.length) {
+      return { rates: period.rates, basis: 'flat' }
+    }
     const tier = contextTierFor(period, promptTokens)
     return tier
       ? { rates: tier.rates, basis: 'flat', tierAbove: tier.abovePromptTokens }
       // `cards` rather than nothing when the prompt length was never stated:
       // the base card is the estimate, but a tier was not ruled out.
-      : { rates: period.rates, basis: 'flat', cards: tierBounds(period, promptTokens) }
+      : { rates: period.rates, basis: 'flat', cards: tierCards(period, promptTokens) }
   }
   const atMs = toMs(at)
   if (atMs !== null) {
@@ -334,22 +384,34 @@ export function ratesFor(
   // A window is an interval, not an ordered pair, so normalise it before
   // blending rather than duplicating the call.
   const [lo, hi] = begin > end ? [end, begin] : [begin, end]
-  const parts = blendParts(schedule, lo, hi, promptTokens)
+  // One walk, three consumers — see `partsFor`.
   const segments = weightedPeriods(schedule, blendStart(lo, hi), hi)
-  return {
-    rates: weightedRates(parts),
-    basis: 'blended',
-    cards: [
-      // Zero-weight segments never influenced the average, so they must not
-      // widen the interval either — a period the window merely touches the
-      // boundary of is not a price this row could have paid.
-      ...parts.filter(part => part.weight > 0).map(part => part.rates),
-      // ...and, when the prompt length was never stated, the tiers of every
-      // period the window did draw on.
-      ...segments.flatMap(({ period }) => tierBounds(period, promptTokens)?.slice(1) ?? []),
-    ],
-    tierAbove: blendedTierAbove(segments, promptTokens),
+  const parts = partsFor(segments, promptTokens)
+  const cards: Rates[] = []
+  for (const part of parts) {
+    // Zero-weight segments never influenced the average, so they must not
+    // widen the interval either — a period the window merely touches the
+    // boundary of is not a price this row could have paid.
+    if (part.weight > 0) {
+      cards.push(part.rates)
+    }
   }
+  // The two halves below are mutually exclusive by construction: a stated
+  // prompt length selects one tier and leaves nothing to bound, an unstated
+  // one bounds every tier and lets no card claim to be the one applied.
+  let tierAbove: number | undefined
+  if (promptTokens === undefined) {
+    for (const { period } of segments) {
+      const tiers = tierCards(period, promptTokens)
+      if (tiers) {
+        cards.push(...tiers)
+      }
+    }
+  }
+  else {
+    tierAbove = blendedTierAbove(segments, promptTokens)
+  }
+  return { rates: weightedRates(parts), basis: 'blended', cards, tierAbove }
 }
 
 /** The one card in force at an instant, plus which tier produced it. */
@@ -362,7 +424,7 @@ function exactAt(schedule: NormalizedSchedule, atMs: number, promptTokens: numbe
     // Knowing *when* the tokens were spent says nothing about how long the
     // prompt was, so an exact instant bounds its tiers exactly as a flat
     // schedule does.
-    cards: tierBounds(period, promptTokens),
+    cards: tierCards(period, promptTokens),
   }
 }
 
@@ -375,23 +437,20 @@ function exactAt(schedule: NormalizedSchedule, atMs: number, promptTokens: numbe
  */
 function blendedTierAbove(
   segments: Array<{ period: PricePeriod }>,
-  promptTokens: number | undefined,
+  promptTokens: number,
 ): number | undefined {
-  if (promptTokens === undefined) {
+  // Reads the segments `partsFor` weighted, so the two cannot disagree about
+  // which periods carried weight — a period given none cannot veto the tier.
+  const first = segments[0]
+  if (!first) {
     return undefined
   }
-  let common: number | undefined
-  let first = true
-  // Reads the segments `blendParts` weighted, so the two cannot disagree
-  // about which periods carried weight — a period given none cannot veto
-  // the tier.
-  for (const { period } of segments) {
-    const tier = contextTierFor(period, promptTokens)?.abovePromptTokens
-    if (first) {
-      common = tier
-      first = false
-    }
-    else if (common !== tier) {
+  // Seeded from the first segment rather than tracked with a flag, because
+  // `undefined` is itself a legal answer ("this period has no tier") and so
+  // cannot double as "nothing read yet".
+  const common = contextTierFor(first.period, promptTokens)?.abovePromptTokens
+  for (let i = 1; i < segments.length; i++) {
+    if (contextTierFor(segments[i]!.period, promptTokens)?.abovePromptTokens !== common) {
       return undefined
     }
   }

@@ -148,25 +148,33 @@ export function ratesFromCost(cost: ModelsDevCost, divisor: number): Rates {
  * (`llmgateway`'s grok-4-20 pair): those numbers are quoted, so they stand.
  */
 export function tierRatesFrom(base: ModelsDevCost, tier: ModelsDevTier, divisor: number): Rates {
-  const input = tier.input! / divisor
-  // A base input of 0 leaves no ratio to scale by; fall through to the
-  // generic defaults rather than inventing one.
+  // Filling the gaps in the cost block and then handing it to `ratesFromCost`,
+  // rather than assembling the card here: what remains after inheritance is
+  // an ordinary partially-quoted models.dev cost, and this file's whole point
+  // is that there is one place deciding what such a block means. A second
+  // copy of the `cache_write -> cache_read -> input x 0.1` chain is the
+  // divergence it exists to prevent.
+  return ratesFromCost(inheritTierGaps(base, tier), divisor)
+}
+
+/** A tier's cost block with the rates it omits filled in from the base. */
+function inheritTierGaps(base: ModelsDevCost, tier: ModelsDevTier): ModelsDevCost {
+  // A base input of 0 leaves no ratio to scale by, so nothing is inherited
+  // and `ratesFromCost`'s generic defaults apply — inventing a ratio would be
+  // worse than defaulting.
   const ratio = typeof base.input === 'number' && base.input > 0 ? tier.input! / base.input : null
-  const inherited = (own: number | undefined, from: number | undefined): number | null => {
-    if (typeof own === 'number' && Number.isFinite(own)) {
-      return own / divisor
-    }
-    return ratio !== null && typeof from === 'number' && Number.isFinite(from) ? (from * ratio) / divisor : null
-  }
-  const cacheRead = inherited(tier.cache_read, base.cache_read) ?? input * 0.1
-  const cacheWrite = inherited(tier.cache_write, base.cache_write) ?? cacheRead
+  const scaled = (from: number | undefined): number | undefined =>
+    ratio !== null && typeof from === 'number' && Number.isFinite(from) ? from * ratio : undefined
   return {
-    inputCostPerToken: input,
-    cacheCreationInputCostPerToken: cacheWrite,
-    cacheReadInputCostPerToken: cacheRead,
-    cachedInputCostPerToken: cacheRead,
-    outputCostPerToken: tier.output! / divisor,
+    ...tier,
+    cache_read: quoted(tier.cache_read) ?? scaled(base.cache_read),
+    cache_write: quoted(tier.cache_write) ?? scaled(base.cache_write),
   }
+}
+
+/** A rate the tier states in its own right, or undefined. */
+function quoted(rate: number | undefined): number | undefined {
+  return typeof rate === 'number' && Number.isFinite(rate) ? rate : undefined
 }
 
 /**
