@@ -109,8 +109,14 @@ export function normalizeSchedule(
     // Every window was nonsense, or no weekday survived: either way the
     // period simply has no peak — which also means its tiers are no longer in
     // conflict and can be kept.
+    //
+    // Dropping `peak` off the period rather than rebuilding the two fields
+    // that are wanted: enumerated, this branch quietly lost `reasoningRates`
+    // (a thinking request billed at the base card, a 3x undercharge on qwen)
+    // and would lose the next card added beside it, while the peak-kept
+    // branch below spreads and keeps everything.
     return windowsUtc.length === 0 || daysUtc?.length === 0
-      ? normalizeTiers({ from: period.from, rates: period.rates, contextTiers: period.contextTiers }, onWarn, id)
+      ? normalizeTiers({ ...period, peak: undefined }, onWarn, id)
       // One fixed key order for every peak in the catalogue, whatever order
       // the source wrote its fields in: `cardFor` reads `peak.daysUtc` and
       // `peak.rates` once per priced row, and two shapes make those loads

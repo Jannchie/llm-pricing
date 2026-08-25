@@ -463,6 +463,31 @@ describe('a schedule the caller supplied must not silently mis-price', () => {
     }
   })
 
+  it('keeps the rest of a period when a nonsense peak is stripped off it', () => {
+    // Stripping the peak used to rebuild the period from the two fields
+    // someone remembered, so a thinking variant beside it vanished and a
+    // reasoning request was billed the base card. Both ways of losing the
+    // peak — no usable window, and no usable weekday — go through it.
+    for (const peak of [
+      { windowsUtc: [] as Array<[number, number]>, rates: rates(2) },
+      { windowsUtc: [[1, 4]] as Array<[number, number]>, daysUtc: [9, -2], rates: rates(2) },
+    ]) {
+      const catalog = build([
+        { from: Number.NEGATIVE_INFINITY, rates: rates(1), reasoningRates: rates(3), peak },
+      ])
+      const thinking = { model: 'm', inputTokens: 0, cachedInputTokens: 0, outputTokens: 1e6, reasoningOutputTokens: 1, perRequest: true }
+      const priced = catalog.estimate(thinking)
+      // The same period with no peak written on it at all — the peak was
+      // nonsense, so stripping it must leave the thinking card reachable.
+      const withoutPeak = build([{ from: Number.NEGATIVE_INFINITY, rates: rates(1), reasoningRates: rates(3) }])
+      expect(priced.cost, JSON.stringify(peak)).toBeCloseTo(withoutPeak.estimate(thinking).cost, 12)
+      // ...and that card really is the dearer one, so the assertion above
+      // cannot pass by both falling back to the base rate.
+      expect(priced.cost, JSON.stringify(peak))
+        .toBeGreaterThan(build([{ from: Number.NEGATIVE_INFINITY, rates: rates(1) }]).estimate(thinking).cost)
+    }
+  })
+
   it('counts overlapping peak windows once', () => {
     // [1,5) and [3,8) cover 7 hours, not 9.
     const catalog = build([{ from: Number.NEGATIVE_INFINITY, rates: rates(1), peak: { windowsUtc: [[1, 5], [3, 8]], rates: rates(2) } }])
