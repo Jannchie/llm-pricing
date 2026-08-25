@@ -160,13 +160,42 @@ export interface ContextTier extends RateCard {
   abovePromptTokens: number
 }
 
+/**
+ * When* a peak card applies, with no reference to what it costs.
+ *
+ * Named and separated from the rates so the primitives that answer "is this
+ * instant peak?" take the whole shape rather than its fields: `daysUtc` was
+ * once a loose optional argument beside `windowsUtc`, and every call that
+ * forgot it kept compiling while billing DeepSeek's weekends at twice the
+ * rate.
+ */
+export interface PeakWindows {
+  /** Daily [startHour, endHour) UTC windows. */
+  windowsUtc: Array<[number, number]>
+  /**
+   * The UTC weekdays (0 = Sunday) those windows apply on; absent means every
+   * day. DeepSeek bills the off-peak rate around the clock at weekends.
+   *
+   * One set for every window, in UTC — which states a vendor's *local*
+   * weekday rule only while none of its windows crosses a UTC midnight.
+   * DeepSeek's clear that bar with room to spare (01:00-10:00 UTC is
+   * 09:00-18:00 the same Beijing day, so the two weekdays cannot disagree
+   * inside a window), but a vendor whose local peak straddles midnight would
+   * need a different weekday set per side of it and cannot be written here:
+   * expressing that is a change to this shape, not a `daysUtc` a caller can
+   * pick. Nothing enforces the precondition, so check it when adding a
+   * vendor — the failure is silent and per-instant.
+   */
+  daysUtc?: number[]
+}
+
 // One contiguous slice of a model's price history. `rates` is the flat
 // (or off-peak) card; `peak` overrides it inside daily [startHour, endHour)
 // **UTC** windows. Whole hours only — a consumer anchoring rows to a UTC
 // hour could not honour a window boundary at :30 exactly.
 export interface PricePeriod extends RateCard {
   from: number
-  peak?: { windowsUtc: Array<[number, number]>, rates: Rates }
+  peak?: PeakWindows & { rates: Rates }
   /**
    * Long-context tiers, ascending by threshold; the highest one the prompt
    * clears wins. Only consulted when the caller states the row describes a

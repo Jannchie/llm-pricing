@@ -1,4 +1,4 @@
-import type { PriceSchedule, Rates } from '../types'
+import type { PricePeriod, PriceSchedule, Rates } from '../types'
 
 // ---------------------------------------------------------------------
 // DeepSeek — first-party schedules that OUTRANK the OpenRouter catalogue.
@@ -29,6 +29,16 @@ const DEEPSEEK_PEAK_FROM_MS = Date.UTC(2026, 7, 16, 16, 0, 0)
 // billed at exactly half the peak rate.
 const DEEPSEEK_PEAK_WINDOWS_UTC: Array<[number, number]> = [[1, 4], [6, 10]]
 
+// From 00:00 Beijing on 2026-08-23, the peak windows apply Monday to Friday
+// only: DeepSeek charges the off-peak rate around the clock at weekends.
+const DEEPSEEK_WEEKEND_OFF_PEAK_FROM_MS = Date.UTC(2026, 7, 22, 16, 0, 0)
+
+// Monday-Friday. The weekend is DeepSeek's — i.e. Beijing's — but every peak
+// window falls in 01:00-10:00 UTC, which is 09:00-18:00 the *same* calendar
+// day in Beijing, so the UTC weekday and the Beijing one never disagree
+// anywhere the windows can apply.
+const DEEPSEEK_PEAK_DAYS_UTC = [1, 2, 3, 4, 5]
+
 // DeepSeek publishes three prices per model — cache hit, cache miss and
 // output, in $/MTok. There is deliberately no cache-*write* price: writing
 // the context cache is free, and the tokens that missed are billed at the
@@ -45,6 +55,31 @@ function deepseekRates(hitPerMTok: number, missPerMTok: number, outputPerMTok: n
   }
 }
 
+/**
+ * The two periods DeepSeek's peak schedule has had, from one pair of cards.
+ *
+ * The weekend period differs from the weekday-and-weekend one it replaces by
+ * exactly `daysUtc`, so it is derived from it rather than restated: written
+ * out twice, the six rate literals per model had nothing checking the copies
+ * still agreed, and the next rate correction would have landed on one period
+ * only.
+ */
+function deepseekPeakPeriods(offPeak: Rates, peak: Rates): PricePeriod[] {
+  const weekdaysAndWeekends: PricePeriod = {
+    from: DEEPSEEK_PEAK_FROM_MS,
+    rates: offPeak,
+    peak: { windowsUtc: DEEPSEEK_PEAK_WINDOWS_UTC, rates: peak },
+  }
+  return [
+    weekdaysAndWeekends,
+    {
+      ...weekdaysAndWeekends,
+      from: DEEPSEEK_WEEKEND_OFF_PEAK_FROM_MS,
+      peak: { ...weekdaysAndWeekends.peak!, daysUtc: DEEPSEEK_PEAK_DAYS_UTC },
+    },
+  ]
+}
+
 const DEEPSEEK_SQL_MATCH = ['%deepseek%']
 
 export const OVERRIDES: Record<string, PriceSchedule> = {
@@ -54,11 +89,7 @@ export const OVERRIDES: Record<string, PriceSchedule> = {
     sqlMatch: DEEPSEEK_SQL_MATCH,
     periods: [
       { from: Number.NEGATIVE_INFINITY, rates: deepseekRates(0.0028, 0.14, 0.28) },
-      {
-        from: DEEPSEEK_PEAK_FROM_MS,
-        rates: deepseekRates(0.007, 0.22, 0.66),
-        peak: { windowsUtc: DEEPSEEK_PEAK_WINDOWS_UTC, rates: deepseekRates(0.014, 0.44, 1.32) },
-      },
+      ...deepseekPeakPeriods(deepseekRates(0.007, 0.22, 0.66), deepseekRates(0.014, 0.44, 1.32)),
     ],
   },
   'deepseek-v4-pro': {
@@ -67,11 +98,7 @@ export const OVERRIDES: Record<string, PriceSchedule> = {
     sqlMatch: DEEPSEEK_SQL_MATCH,
     periods: [
       { from: Number.NEGATIVE_INFINITY, rates: deepseekRates(0.003_625, 0.435, 0.87) },
-      {
-        from: DEEPSEEK_PEAK_FROM_MS,
-        rates: deepseekRates(0.022, 0.66, 1.98),
-        peak: { windowsUtc: DEEPSEEK_PEAK_WINDOWS_UTC, rates: deepseekRates(0.044, 1.32, 3.96) },
-      },
+      ...deepseekPeakPeriods(deepseekRates(0.022, 0.66, 1.98), deepseekRates(0.044, 1.32, 3.96)),
     ],
   },
 }

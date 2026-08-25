@@ -117,6 +117,19 @@ describe('pricingcatalog overrides', () => {
     expect(peak!.inputCostPerToken).toBeCloseTo(offPeak!.inputCostPerToken * 2, 15)
   })
 
+  it('charges off-peak all weekend once deepseek stopped billing peak on saturdays', () => {
+    // 2026-08-29 is a Saturday, 2026-08-28 the Friday before it: same UTC
+    // peak hour, and from 00:00 Beijing on 2026-08-23 only the weekday one
+    // is billed at the peak rate.
+    const saturday = catalog.getPrice('deepseek-v4-flash', Date.UTC(2026, 7, 29, 2))
+    const friday = catalog.getPrice('deepseek-v4-flash', Date.UTC(2026, 7, 28, 2))
+    expect(saturday!.inputCostPerToken).toBeCloseTo(0.22 / 1e6, 15)
+    expect(friday!.inputCostPerToken).toBeCloseTo(0.44 / 1e6, 15)
+    // The Saturday before the rule changed was still billed at peak.
+    const oldSaturday = catalog.getPrice('deepseek-v4-flash', Date.UTC(2026, 7, 22, 2))
+    expect(oldSaturday!.inputCostPerToken).toBeCloseTo(0.44 / 1e6, 15)
+  })
+
   it('exposes the sql patterns for every time-sensitive schedule', () => {
     expect(catalog.timeSensitiveSqlPatterns()).toEqual(['%deepseek%'])
   })

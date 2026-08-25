@@ -1,4 +1,4 @@
-import type { Rates } from '../src/types'
+import type { PeakWindows, Rates } from '../src/types'
 import { describe, expect, it } from 'vitest'
 import { normalizeSchedule } from '../src/normalize'
 import {
@@ -24,6 +24,8 @@ function rates(n: number): Rates {
 }
 
 const WINDOWS: Array<[number, number]> = [[1, 4], [6, 10]]
+const PEAK = { windowsUtc: WINDOWS }
+const WEEKDAY_PEAK = { windowsUtc: WINDOWS, daysUtc: [1, 2, 3, 4, 5] }
 const CUTOVER = Date.UTC(2026, 7, 16, 16, 0, 0)
 
 // Built the way production builds them: these primitives now accept only a
@@ -98,17 +100,34 @@ describe('ispeakhour', () => {
     [10, false],
     [23, false],
   ])('hour %i -> %s', (hour, expected) => {
-    expect(isPeakHour(WINDOWS, Date.UTC(2026, 8, 1, hour, 30))).toBe(expected)
+    expect(isPeakHour(PEAK, Date.UTC(2026, 8, 1, hour, 30))).toBe(expected)
   })
 
   it('is half-open at the window edges', () => {
-    expect(isPeakHour([[1, 2]], Date.UTC(2026, 8, 1, 1, 0))).toBe(true)
-    expect(isPeakHour([[1, 2]], Date.UTC(2026, 8, 1, 2, 0))).toBe(false)
+    expect(isPeakHour({ windowsUtc: [[1, 2]] as Array<[number, number]> }, Date.UTC(2026, 8, 1, 1, 0))).toBe(true)
+    expect(isPeakHour({ windowsUtc: [[1, 2]] as Array<[number, number]> }, Date.UTC(2026, 8, 1, 2, 0))).toBe(false)
   })
 
   it('handles pre-epoch timestamps without going negative', () => {
-    expect(isPeakHour(WINDOWS, Date.UTC(1969, 11, 31, 2, 0))).toBe(true)
-    expect(isPeakHour(WINDOWS, Date.UTC(1969, 11, 31, 5, 0))).toBe(false)
+    expect(isPeakHour(PEAK, Date.UTC(1969, 11, 31, 2, 0))).toBe(true)
+    expect(isPeakHour(PEAK, Date.UTC(1969, 11, 31, 5, 0))).toBe(false)
+  })
+
+  it('honours a weekday restriction', () => {
+    // 2026-08-24 is a Monday, so the week runs Mon 24 to Sun 30.
+    for (let day = 24; day <= 30; day++) {
+      const weekday = day <= 28
+      expect(isPeakHour(WEEKDAY_PEAK, Date.UTC(2026, 7, day, 2)), `aug ${day}`).toBe(weekday)
+      // An off-peak hour stays off-peak on every day of the week.
+      expect(isPeakHour(WEEKDAY_PEAK, Date.UTC(2026, 7, day, 5)), `aug ${day}`).toBe(false)
+    }
+  })
+
+  it('picks the same weekdays before the epoch', () => {
+    // 1969-12-29 was a Monday, 1970-01-03 a Saturday.
+    expect(isPeakHour(WEEKDAY_PEAK, Date.UTC(1969, 11, 29, 2))).toBe(true)
+    expect(isPeakHour(WEEKDAY_PEAK, Date.UTC(1969, 11, 28, 2))).toBe(false)
+    expect(isPeakHour(WEEKDAY_PEAK, Date.UTC(1970, 0, 3, 2))).toBe(false)
   })
 })
 
@@ -122,10 +141,10 @@ describe('ratesat', () => {
 })
 
 // Independent implementation of peakMsBetween: walk the range hour by hour.
-function brute(windows: Array<[number, number]>, from: number, to: number): number {
+function brute(peak: PeakWindows, from: number, to: number): number {
   let total = 0
   for (let t = from; t < to; t += HOUR_MS) {
-    if (isPeakHour(windows, t)) {
+    if (isPeakHour(peak, t)) {
       total += HOUR_MS
     }
   }
@@ -136,29 +155,55 @@ describe('peakmsbetween', () => {
   it('matches an hour-by-hour walk over a month', () => {
     const from = Date.UTC(2026, 7, 1)
     const to = Date.UTC(2026, 8, 1)
-    expect(peakMsBetween(WINDOWS, from, to)).toBe(brute(WINDOWS, from, to))
+    expect(peakMsBetween(PEAK, from, to)).toBe(brute(PEAK, from, to))
   })
 
   it('matches an hour-by-hour walk on a ragged range', () => {
     const from = Date.UTC(2026, 7, 3, 7)
     const to = Date.UTC(2026, 7, 19, 2)
-    expect(peakMsBetween(WINDOWS, from, to)).toBe(brute(WINDOWS, from, to))
+    expect(peakMsBetween(PEAK, from, to)).toBe(brute(PEAK, from, to))
   })
 
   it('counts 7 peak hours per whole day', () => {
     const from = Date.UTC(2026, 7, 1)
-    expect(peakMsBetween(WINDOWS, from, from + DAY_MS)).toBe(7 * HOUR_MS)
+    expect(peakMsBetween(PEAK, from, from + DAY_MS)).toBe(7 * HOUR_MS)
   })
 
   it('is zero for an empty range', () => {
     const t = Date.UTC(2026, 7, 1, 2)
-    expect(peakMsBetween(WINDOWS, t, t)).toBe(0)
+    expect(peakMsBetween(PEAK, t, t)).toBe(0)
   })
 
   it('works across the epoch boundary', () => {
     const from = Date.UTC(1969, 11, 30)
     const to = Date.UTC(1970, 0, 2)
-    expect(peakMsBetween(WINDOWS, from, to)).toBe(brute(WINDOWS, from, to))
+    expect(peakMsBetween(PEAK, from, to)).toBe(brute(PEAK, from, to))
+  })
+
+  it('matches an hour-by-hour walk with a weekday restriction', () => {
+    for (const [from, to] of [
+      [Date.UTC(2026, 7, 1), Date.UTC(2026, 8, 1)],
+      [Date.UTC(2026, 7, 3, 7), Date.UTC(2026, 7, 19, 2)],
+      [Date.UTC(2026, 7, 22, 16), Date.UTC(2026, 7, 31, 3)],
+      [Date.UTC(1969, 11, 24, 5), Date.UTC(1970, 0, 9, 8)],
+    ] as Array<[number, number]>) {
+      expect(peakMsBetween(WEEKDAY_PEAK, from, to), `${from}..${to}`)
+        .toBe(brute(WEEKDAY_PEAK, from, to))
+    }
+  })
+
+  it('does not multiply a week by a repeated weekday', () => {
+    // `normalizeSchedule` deduplicates, but these primitives are exported, so
+    // a hand-written peak must not bill 9 peak hours for the 3 it names.
+    const monday = Date.UTC(2026, 7, 24)
+    expect(peakMsBetween({ windowsUtc: [[1, 4]], daysUtc: [1, 1, 1] }, monday, monday + 7 * DAY_MS))
+      .toBe(3 * HOUR_MS)
+  })
+
+  it('counts no peak hours across a whole weekend', () => {
+    // Saturday 2026-08-29 00:00 UTC to Monday 00:00 UTC.
+    const from = Date.UTC(2026, 7, 29)
+    expect(peakMsBetween(WEEKDAY_PEAK, from, from + 2 * DAY_MS)).toBe(0)
   })
 })
 
@@ -184,7 +229,7 @@ describe('blendrates', () => {
     // own blend is the 7/17 split above.
     const from = CUTOVER - DAY_MS
     const to = CUTOVER + DAY_MS
-    const postDay = peakMsBetween(WINDOWS, CUTOVER, to)
+    const postDay = peakMsBetween(PEAK, CUTOVER, to)
     const expected = (DAY_MS * 1 + postDay * 20 + (DAY_MS - postDay) * 10) / (2 * DAY_MS)
     expect(blendRates(scheduled, from, to).inputCostPerToken).toBeCloseTo(expected, 10)
   })

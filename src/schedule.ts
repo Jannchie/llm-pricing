@@ -1,4 +1,4 @@
-import type { ContextTier, NormalizedSchedule, PriceBasis, PricePeriod, PriceSchedule, RateCard, Rates, TimeInput } from './types'
+import type { ContextTier, NormalizedSchedule, PeakWindows, PriceBasis, PricePeriod, PriceSchedule, RateCard, Rates, TimeInput } from './types'
 import { weightedRates } from './rates'
 import { DAY_MS, HOUR_MS } from './types'
 
@@ -103,11 +103,31 @@ export function periodAt(schedule: NormalizedSchedule, atMs: number): PricePerio
   return current
 }
 
-export function isPeakHour(windows: Array<[number, number]>, atMs: number): boolean {
+/**
+ * The UTC weekday (0 = Sunday) of a whole-day index counted from the epoch.
+ * 1970-01-01 was a Thursday, and the `+ 7` keeps pre-epoch days positive.
+ */
+function weekdayOf(dayIndex: number): number {
+  return ((dayIndex + 4) % 7 + 7) % 7
+}
+
+/**
+ * Whether a day carries the peak windows at all. `daysUtc` absent means
+ * every day does — the shape every vendor but DeepSeek publishes.
+ */
+function isPeakDay(daysUtc: number[] | undefined, dayIndex: number): boolean {
+  return daysUtc === undefined || daysUtc.includes(weekdayOf(dayIndex))
+}
+
+export function isPeakHour(peak: PeakWindows, atMs: number): boolean {
   // Epoch ms floors to UTC midnight without any timezone lookup, which is
   // exactly what the windows are defined against.
-  const hour = Math.floor((atMs - Math.floor(atMs / DAY_MS) * DAY_MS) / HOUR_MS)
-  return windows.some(([start, end]) => hour >= start && hour < end)
+  const dayIndex = Math.floor(atMs / DAY_MS)
+  if (!isPeakDay(peak.daysUtc, dayIndex)) {
+    return false
+  }
+  const hour = Math.floor((atMs - dayIndex * DAY_MS) / HOUR_MS)
+  return peak.windowsUtc.some(([start, end]) => hour >= start && hour < end)
 }
 
 /**
@@ -155,7 +175,7 @@ function variantOf(card: RateCard, usedReasoning: boolean | undefined): Rates {
  * early return rather than another axis.
  */
 function cardFor(period: PricePeriod, atMs: number | undefined, facts: RequestFacts): Rates {
-  if (atMs !== undefined && period.peak && isPeakHour(period.peak.windowsUtc, atMs)) {
+  if (atMs !== undefined && period.peak && isPeakHour(period.peak, atMs)) {
     return period.peak.rates
   }
   return variantOf(contextTierFor(period, facts.promptTokens) ?? period, facts.usedReasoning)
@@ -170,11 +190,69 @@ export function ratesAt(schedule: NormalizedSchedule, atMs: number, facts: Reque
  * Milliseconds of one daily UTC window that fall in [epoch, x). Closed
  * form: whole elapsed days each contribute the window's full length, and
  * the partial last day contributes however much of it has elapsed.
+ *
+ * Everything about *x* — how many peak days precede it, how far into its own
+ * day it is, and whether that day carries the windows at all — is a property
+ * of the boundary rather than of the window, so `peakMsBetween` computes it
+ * once per boundary and passes it in.
  */
-function dailyWindowMsUpTo(x: number, startMs: number, lengthMs: number): number {
+function dailyWindowMsUpTo(day: DayCount, startMs: number, lengthMs: number): number {
+  return day.peakDaysBefore * lengthMs + (day.counts ? Math.min(Math.max(day.intoDay - startMs, 0), lengthMs) : 0)
+}
+
+/** What `dailyWindowMsUpTo` needs to know about one end of a range. */
+interface DayCount {
+  /**
+   * Peak days strictly before this one — signed, so differencing two of
+   * these still gives the count inside a range that starts before the epoch.
+   */
+  peakDaysBefore: number
+  /** Milliseconds elapsed in this day. */
+  intoDay: number
+  /** Whether this day carries the peak windows. */
+  counts: boolean
+}
+
+/**
+ * Everything the prefix sum needs about one boundary: whole weeks contribute
+ * their peak days each, leaving at most six days to walk.
+ */
+function dayCountAt(x: number, daysUtc: number[] | undefined): DayCount {
   const days = Math.floor(x / DAY_MS)
   const intoDay = x - days * DAY_MS
-  return days * lengthMs + Math.min(Math.max(intoDay - startMs, 0), lengthMs)
+  if (daysUtc === undefined) {
+    return { peakDaysBefore: days, intoDay, counts: true }
+  }
+  const weeks = Math.floor(days / 7)
+  let count = weeks * peakDaysPerWeek(daysUtc)
+  for (let day = weeks * 7; day < days; day++) {
+    if (isPeakDay(daysUtc, day)) {
+      count++
+    }
+  }
+  return { peakDaysBefore: count, intoDay, counts: isPeakDay(daysUtc, days) }
+}
+
+/**
+ * How many days of a whole week are peak days — counted rather than read off
+ * `daysUtc.length`.
+ *
+ * `normalizeSchedule` does deduplicate, but this is a multiplier on every
+ * whole week in the range, so trusting that invariant across a module
+ * boundary means a caller reaching these exported primitives with a
+ * hand-written `[1, 1, 1]` bills three times the peak hours it should. Seven
+ * membership tests on an at-most-seven-element array, twice per blended
+ * segment and never on the per-row path, is not a price worth paying for
+ * that.
+ */
+function peakDaysPerWeek(daysUtc: number[]): number {
+  let perWeek = 0
+  for (let weekday = 0; weekday < 7; weekday++) {
+    if (daysUtc.includes(weekday)) {
+      perWeek++
+    }
+  }
+  return perWeek
 }
 
 /**
@@ -281,15 +359,19 @@ function unruledOutCards(period: PricePeriod, facts: RequestFacts): Rates[] | un
 /**
  * Milliseconds of [from, to) that land inside a daily UTC peak window.
  *
- * O(windows) — differencing the two prefix sums beats walking the range a
- * day at a time, which cost ~730 iterations for a year-long window.
+ * O(windows + 7) — differencing the two prefix sums beats walking the range a
+ * day at a time, which cost ~730 iterations for a year-long window. The
+ * weekday count each prefix needs depends only on the boundary, so it is
+ * taken once rather than per window.
  */
-export function peakMsBetween(windows: Array<[number, number]>, fromMs: number, toMs: number): number {
+export function peakMsBetween(peak: PeakWindows, fromMs: number, toMs: number): number {
+  const start = dayCountAt(fromMs, peak.daysUtc)
+  const end = dayCountAt(toMs, peak.daysUtc)
   let total = 0
-  for (const [start, end] of windows) {
-    const startMs = start * HOUR_MS
-    const lengthMs = (end - start) * HOUR_MS
-    total += dailyWindowMsUpTo(toMs, startMs, lengthMs) - dailyWindowMsUpTo(fromMs, startMs, lengthMs)
+  for (const [from, to] of peak.windowsUtc) {
+    const startMs = from * HOUR_MS
+    const lengthMs = (to - from) * HOUR_MS
+    total += dailyWindowMsUpTo(end, startMs, lengthMs) - dailyWindowMsUpTo(start, startMs, lengthMs)
   }
   return total
 }
@@ -333,7 +415,7 @@ function partsFor(
   for (const { period, from, to } of segments) {
     const span = to - from
     if (period.peak) {
-      const peakMs = peakMsBetween(period.peak.windowsUtc, from, to)
+      const peakMs = peakMsBetween(period.peak, from, to)
       parts.push({ rates: period.peak.rates, weight: peakMs }, { rates: period.rates, weight: span - peakMs })
     }
     else {

@@ -193,7 +193,11 @@ export function scaleSchedule(base: PriceSchedule, multiplier: number, displayNa
       // is still charged the thinking rate, at the premium tier's multiple.
       reasoningRates: period.reasoningRates && scaleRates(period.reasoningRates, multiplier),
       peak: period.peak
-        ? { windowsUtc: period.peak.windowsUtc, rates: scaleRates(period.peak.rates, multiplier) }
+        // Spread, not rebuilt field by field: a premium variant is the same
+        // model on the same schedule, so anything that says *when* the peak
+        // applies has to survive scaling — a dropped `daysUtc` would bill its
+        // weekends at twice the rate.
+        ? { ...period.peak, rates: scaleRates(period.peak.rates, multiplier) }
         : undefined,
       // Scaled, not dropped: `gpt-5.4-fast` is the same model on a premium
       // tier, so it keeps the base model's 272k threshold at 2x the rate.

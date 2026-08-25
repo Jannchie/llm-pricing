@@ -443,6 +443,26 @@ describe('a schedule the caller supplied must not silently mis-price', () => {
     }
   })
 
+  it('keeps a blended rate inside [off-peak, peak] whatever the weekdays say', () => {
+    const week: readonly [number, number] = [Date.UTC(2026, 7, 24), Date.UTC(2026, 7, 31)]
+    const tokens = { inputTokens: 1e6, cachedInputTokens: 0, outputTokens: 0 }
+    for (const daysUtc of [
+      [1, 1, 1], // duplicated: a whole week counted the day three times over
+      [0, 1, 2, 3, 4, 5, 6], // every day, i.e. no restriction at all
+      [-1, 7, 99], // days that do not exist: no peak survives
+      [2.7], // not a whole day
+    ]) {
+      const catalog = build([{
+        from: Number.NEGATIVE_INFINITY,
+        rates: rates(1),
+        peak: { windowsUtc: [[1, 4]] as Array<[number, number]>, daysUtc, rates: rates(2) },
+      }])
+      const cost = catalog.estimate({ model: 'm', window: week, ...tokens }).cost
+      expect(cost, `days ${JSON.stringify(daysUtc)}`).toBeGreaterThanOrEqual(1)
+      expect(cost, `days ${JSON.stringify(daysUtc)}`).toBeLessThanOrEqual(2)
+    }
+  })
+
   it('counts overlapping peak windows once', () => {
     // [1,5) and [3,8) cover 7 hours, not 9.
     const catalog = build([{ from: Number.NEGATIVE_INFINITY, rates: rates(1), peak: { windowsUtc: [[1, 5], [3, 8]], rates: rates(2) } }])

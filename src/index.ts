@@ -32,6 +32,7 @@ export type {
   CostEstimate,
   ModelPrice,
   NormalizedSchedule,
+  PeakWindows,
   PriceBasis,
   PricePeriod,
   PriceSchedule,

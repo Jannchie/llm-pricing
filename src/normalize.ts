@@ -105,11 +105,17 @@ export function normalizeSchedule(
       return normalizeTiers(period, onWarn, id)
     }
     const windowsUtc = normalizeWindows(period.peak.windowsUtc)
-    // Every window was nonsense: the period simply has no peak — which also
-    // means its tiers are no longer in conflict and can be kept.
-    return windowsUtc.length === 0
+    const daysUtc = normalizeDays(period.peak.daysUtc)
+    // Every window was nonsense, or no weekday survived: either way the
+    // period simply has no peak — which also means its tiers are no longer in
+    // conflict and can be kept.
+    return windowsUtc.length === 0 || daysUtc?.length === 0
       ? normalizeTiers({ from: period.from, rates: period.rates, contextTiers: period.contextTiers }, onWarn, id)
-      : normalizeTiers({ ...period, peak: { ...period.peak, windowsUtc } }, onWarn, id)
+      // One fixed key order for every peak in the catalogue, whatever order
+      // the source wrote its fields in: `cardFor` reads `peak.daysUtc` and
+      // `peak.rates` once per priced row, and two shapes make those loads
+      // polymorphic.
+      : normalizeTiers({ ...period, peak: { windowsUtc, daysUtc, rates: period.peak.rates } }, onWarn, id)
   })
 
   // The first period must open at -Infinity. `periodAt` already falls back
@@ -243,4 +249,24 @@ function normalizeWindows(windows: Array<[number, number]>): Array<[number, numb
     }
   }
   return merged
+}
+
+/**
+ * Reduce peak weekdays to a deduplicated set of real UTC weekdays, or
+ * `undefined` for "every day" — the shape a vendor without a weekday rule
+ * publishes, and the one the hot path skips the day check for entirely.
+ *
+ * Deduplicated and sorted so that one weekday rule has one representation —
+ * two schedules that mean "weekdays" compare equal whichever order they were
+ * written in. The blend arithmetic counts its own distinct days rather than
+ * relying on that, so a duplicate is a tidiness problem, not a pricing one.
+ */
+function normalizeDays(days: number[] | undefined): number[] | undefined {
+  if (days === undefined) {
+    return undefined
+  }
+  const seen = new Set(days.filter(day => Number.isInteger(day) && day >= 0 && day <= 6))
+  // All seven days *is* "every day", and saying so lets the hot path take the
+  // cheaper branch.
+  return seen.size === 7 ? undefined : [...seen].sort((a, b) => a - b)
 }
