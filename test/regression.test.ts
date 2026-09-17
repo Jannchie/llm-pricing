@@ -626,3 +626,59 @@ describe('the row api must be able to say what shape the rows are', () => {
     expect(beside / folded).toBeCloseTo(1.4, 9)
   })
 })
+
+describe('a router id prices as the model it ran', () => {
+  // Gateways store the tier they ran as part of the name. The snapshot lists
+  // the vendor's model under the vendor's name only.
+  const catalog = new PricingCatalog({ sources: [] })
+  const priced = (model: string): string | undefined => catalog.getPrice(model)?.displayName
+
+  it.each([
+    ['antigravity/claude-opus-4-6-thinking', 'Claude Opus 4.6'],
+    ['gpt-5-high', 'GPT-5'],
+    ['GPT-5 (xhigh)', 'GPT-5'],
+    ['cursor/cursor-grok-4.6-xhigh', 'Grok 4.6'],
+    ['cursor/claude-4.6-opus-high', 'Claude Opus 4.6'],
+    ['cursor/claude-4.6-opus', 'Claude Opus 4.6'],
+  ])('%s -> %s', (model, expected) => {
+    expect(priced(model)).toBe(expected)
+  })
+
+  it('keeps -fast through the peel so a 6x model is not billed at base', () => {
+    const fast = catalog.getPrice('claude-opus-4-7-fast')!
+    expect(catalog.getPrice('claude-opus-4-7-high-fast')).toEqual(fast)
+    expect(catalog.getPrice('claude-opus-4-7-xhigh-fast')).toEqual(fast)
+    expect(fast.inputCostPerToken).toBeGreaterThan(catalog.getPrice('claude-opus-4-7')!.inputCostPerToken)
+  })
+
+  it('never lets a peeled base undercut a listed -thinking model', async () => {
+    // `m-thinking` is stocked only by a reseller (tier 1) while `m` is the
+    // vendor's own listing (tier 0). "Best hit" across candidates would pick
+    // the vendor's `m`; the literal must still win because it is a real key.
+    const tiered: PricingSource = {
+      name: 'tiered',
+      url: 'https://example.test/tiered',
+      parse: () => new Map([
+        ['m', { ...flatSchedule('m', 1e-6, 1e-7, 4e-6, undefined, 'openrouter'), tier: 0 }],
+        ['m-thinking', { ...flatSchedule('m-thinking', 9e-6, 9e-7, 36e-6, undefined, 'openrouter'), tier: 1 }],
+      ]),
+    }
+    const catalog = new PricingCatalog({ sources: [tiered], cache: memoryCache(), fetch: ok })
+    await catalog.ensureLoaded()
+    expect(catalog.getPrice('m-thinking')!.inputCostPerToken).toBeCloseTo(9e-6, 12)
+    expect(catalog.getPrice('m-thinking-high')!.inputCostPerToken).toBeCloseTo(9e-6, 12)
+    expect(catalog.getPrice('m-high')!.inputCostPerToken).toBeCloseTo(1e-6, 12)
+  })
+
+  it('still prices nothing when no form is listed', () => {
+    expect(catalog.getPrice('gw/no-such-model-2-high')).toBeNull()
+    // A tier stripped from a name that is not a router id must not turn a
+    // different model up: `-low` off `something-low` only ever misses.
+    expect(catalog.getPrice('claude-opus-4-6-turbo-low')).toBeNull()
+  })
+
+  it('does not peel a model word', () => {
+    expect(priced('gpt-5.1-codex-max')).toBe('GPT-5.1 Codex Max')
+    expect(priced('qwen3-max')).toBe('Qwen3 Max')
+  })
+})

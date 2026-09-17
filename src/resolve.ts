@@ -59,6 +59,23 @@ export function undotted(s: string): string {
   return s.replaceAll(/(\d)\.(\d)/g, '$1-$2')
 }
 
+/**
+ * Cursor spells the Claude family after the version — `claude-4.6-opus`
+ * for the vendor's `claude-opus-4.6` — so the family is moved back in
+ * front. Null when the name is not of that shape.
+ *
+ * Anthropic's own 3.x generation was family-last too (`claude-3-5-sonnet`),
+ * so this also manufactures `claude-sonnet-3-5`, which nothing lists. That
+ * is fine: the literal is probed first and an unknown key only misses.
+ */
+export function familyFirst(s: string): string | null {
+  const m = /(^|[/-])claude-(\d+(?:[.-]\d+)?)-(opus|sonnet|haiku)(?=-|$)/.exec(s)
+  if (!m) {
+    return null
+  }
+  return `${s.slice(0, m.index)}${m[1]}claude-${m[3]}-${m[2]}${s.slice(m.index + m[0].length)}`
+}
+
 // Leading `<segment>.` groups Bedrock puts in front of a model id: the
 // vendor, optionally behind a region. Matched against a list rather than a
 // pattern because `gpt-3.5-turbo` also has a dot after a leading segment,
@@ -149,9 +166,17 @@ export function pricingCandidates(model: string): string[] {
       .replace(/-\d{4}-\d{2}-\d{2}$/, '')
       .replace(/-(?:\d{4}|\d{6}|\d{8}|latest)$/, '')
     for (const variant of [form, untagged]) {
-      add(variant)
-      add(dotted(variant))
-      add(undotted(variant))
+      // The family-first respelling rides along as one more spelling of
+      // the same model, never a different one, so it belongs here rather
+      // than in the routing pass below.
+      for (const spelling of [variant, familyFirst(variant)]) {
+        if (!spelling) {
+          continue
+        }
+        add(spelling)
+        add(dotted(spelling))
+        add(undotted(spelling))
+      }
     }
   }
   // A trailing slash makes the last path segment empty, so every
@@ -192,4 +217,55 @@ export function pricingCandidates(model: string): string[] {
     addAllForms(unwrapped)
   }
   return [...set]
+}
+
+// ── Router ids ─────────────────────────────────────────────────────────────
+//
+// A gateway stores the model string the router was addressed by, which
+// carries the reasoning tier it ran, not only the model: Antigravity logs
+// `claude-opus-4-6-thinking`, Codex `gpt-5-high`, Cursor
+// `cursor-grok-4.6-xhigh`. No catalogue keys on those, so every such call
+// priced as unknown although the model itself is listed.
+//
+// The tier words. `fast` is deliberately absent: it is a rate multiplier
+// (`FAST_BY_ID`), so peeling it would bill a 6x model at its base rate.
+// `max`, `mini`, `lite`, `flash`, `pro` are absent because they name models
+// (`gpt-5.1-codex-max`, `qwen3-max`): peeling those would price a different
+// model, which is worse than pricing nothing.
+const ROUTING_TIERS = ['thinking', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none']
+
+/**
+ * The forms of `model` with its routing tiers peeled off, one tier per
+ * step, least peeled first. The input itself is not included.
+ *
+ * A separate pass rather than more candidates: the catalogue consults these
+ * only once nothing at all prices the literal, so a listed `-thinking`
+ * model (`kimi-k2-thinking`) can never be undercut by its base. Within a
+ * step the same exact-key probing applies, so a tier stripped from a name
+ * that was not a router id (`foo-low`) misses rather than mis-prices.
+ *
+ * `-fast` is lifted off before peeling and put back on every form, so
+ * `claude-opus-4-7-high-fast` reaches `claude-opus-4-7-fast` and not the
+ * 6x-cheaper base.
+ */
+export function peelRoutingTiers(model: string): string[] {
+  const forms: string[] = []
+  let id = model.toLowerCase().trim()
+  const fast = id.endsWith('-fast')
+  if (fast) {
+    id = id.slice(0, -'-fast'.length)
+  }
+  for (;;) {
+    const tier = ROUTING_TIERS.find(t => id.endsWith(`-${t}`))
+    if (!tier) {
+      break
+    }
+    id = id.slice(0, -(tier.length + 1))
+    // Nothing but a tier (`high`, `gw/high`) names no model.
+    if (!id || id.endsWith('/')) {
+      break
+    }
+    forms.push(fast ? `${id}-fast` : id)
+  }
+  return forms
 }

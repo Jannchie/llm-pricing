@@ -10,7 +10,7 @@ import { OVERRIDES } from './catalog/overrides'
 import { billedTokens, costFromBilled, promptOfBilled, totalOfBilled, usedReasoning } from './estimate'
 import { normalizeSchedule } from './normalize'
 import { mergeLiveQuote } from './rates'
-import { pricingCandidates } from './resolve'
+import { peelRoutingTiers, pricingCandidates } from './resolve'
 import { estimateCostFromRow as estimateRow } from './row'
 import { isTimeSensitive, NOTHING_KNOWN, pricesByRequest, ratesFor, toMs } from './schedule'
 import { modelsDevSource } from './sources'
@@ -496,7 +496,20 @@ export class PricingCatalog {
   }
 
   private resolveSchedule(model: string): PriceSchedule | null {
-    const candidates = pricingCandidates(model)
+    // Literal first, always. A router id (`claude-opus-4-6-thinking`,
+    // `gpt-5-high`) is tried with its tiers peeled only once no spelling of
+    // the name as given prices, so a listed `-thinking` model is never
+    // undercut by its base. See `peelRoutingTiers`.
+    for (const form of [model, ...peelRoutingTiers(model)]) {
+      const schedule = this.resolveCandidates(pricingCandidates(form))
+      if (schedule) {
+        return schedule
+      }
+    }
+    return null
+  }
+
+  private resolveCandidates(candidates: string[]): PriceSchedule | null {
     // Overrides first: they exist precisely because a catalogue's answer
     // for these models is wrong (reseller rate) or unrepresentable
     // (peak/off-peak).

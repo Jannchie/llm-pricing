@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dotted, pricingCandidates } from '../src/resolve'
+import { dotted, familyFirst, peelRoutingTiers, pricingCandidates } from '../src/resolve'
 
 describe('dotted', () => {
   it('joins version digits with a dot', () => {
@@ -72,5 +72,71 @@ describe('pricingcandidates', () => {
 
   it('never returns an empty string', () => {
     expect(pricingCandidates('gpt-5')).not.toContain('')
+  })
+})
+
+describe('familyfirst', () => {
+  it.each([
+    ['claude-4.6-opus', 'claude-opus-4.6'],
+    ['claude-4-6-opus', 'claude-opus-4-6'],
+    ['claude-5-sonnet', 'claude-sonnet-5'],
+    ['cursor/claude-4.6-opus-high', 'cursor/claude-opus-4.6-high'],
+    ['cursor-claude-4.6-haiku', 'cursor-claude-haiku-4.6'],
+  ])('moves the family in front of the version: %s', (model, expected) => {
+    expect(familyFirst(model)).toBe(expected)
+  })
+
+  it('leaves a family-first name alone', () => {
+    expect(familyFirst('claude-opus-4.6')).toBeNull()
+    expect(familyFirst('anthropic/claude-sonnet-4-6-thinking')).toBeNull()
+  })
+
+  it('does not fire inside another word', () => {
+    expect(familyFirst('myclaude-4-opus')).toBeNull()
+    expect(familyFirst('claude-4-opusx')).toBeNull()
+  })
+})
+
+describe('peelroutingtiers', () => {
+  it('peels one tier per step, least peeled first', () => {
+    expect(peelRoutingTiers('gpt-5-high')).toEqual(['gpt-5'])
+    expect(peelRoutingTiers('antigravity/claude-opus-4-6-thinking')).toEqual(['antigravity/claude-opus-4-6'])
+    expect(peelRoutingTiers('m-thinking-xhigh')).toEqual(['m-thinking', 'm'])
+  })
+
+  it('carries -fast through the peel instead of dropping it', () => {
+    // `-fast` is a rate multiplier: the 6x card must come back, not the base.
+    expect(peelRoutingTiers('claude-opus-4-7-high-fast')).toEqual(['claude-opus-4-7-fast'])
+    expect(peelRoutingTiers('cursor/grok-4.6-xhigh-fast')).toEqual(['cursor/grok-4.6-fast'])
+    expect(peelRoutingTiers('claude-opus-4-7-fast')).toEqual([])
+  })
+
+  it('leaves names that end in a model word alone', () => {
+    expect(peelRoutingTiers('gpt-5.1-codex-max')).toEqual([])
+    expect(peelRoutingTiers('qwen3-max')).toEqual([])
+    expect(peelRoutingTiers('gemini-3.8-flash')).toEqual([])
+    expect(peelRoutingTiers('gpt-5.1-codex-mini')).toEqual([])
+  })
+
+  it('never yields a form that names no model', () => {
+    expect(peelRoutingTiers('high')).toEqual([])
+    expect(peelRoutingTiers('gw/high')).toEqual([])
+  })
+
+  it('lowercases like the rest of the normalization', () => {
+    expect(peelRoutingTiers('GPT-5-High')).toEqual(['gpt-5'])
+  })
+})
+
+describe('pricingcandidates on a family-last spelling', () => {
+  it('offers the family-first spelling in every form', () => {
+    expect(has('cursor/claude-4.6-opus', 'claude-opus-4.6')).toBe(true)
+    expect(has('cursor/claude-4.6-opus', 'claude-opus-4-6')).toBe(true)
+    expect(has('claude-4-6-opus-20260101', 'claude-opus-4.6')).toBe(true)
+  })
+
+  it('keeps the literal ahead of the respelling', () => {
+    const candidates = pricingCandidates('claude-3-5-sonnet')
+    expect(candidates.indexOf('claude-3-5-sonnet')).toBeLessThan(candidates.indexOf('claude-sonnet-3-5'))
   })
 })
