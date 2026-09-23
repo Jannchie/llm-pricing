@@ -62,10 +62,27 @@ export type Rates = Record<RateKey, number>
  */
 export type PriceSource = 'openrouter' | 'modelsdev' | 'fallback' | 'override' | 'missing'
 
+/**
+ * How much a model can read and write in one request, as the catalogue that
+ * quoted its price states it.
+ *
+ * Not a price, but carried on the same quote because it is the same lookup:
+ * a caller that has just asked what a model costs usually needs to know how
+ * big a request can get before it spends anything. Only live catalogues state
+ * it — models.dev's `limit`, OpenRouter's `context_length` — so a card from the
+ * built-in tables leaves both absent rather than guessing.
+ */
+export interface ModelLimits {
+  /** The context window: prompt and completion together, in tokens. */
+  contextWindowTokens?: number
+  /** The most a single completion may produce, in tokens. */
+  maxOutputTokens?: number
+}
+
 // The rate card actually applied to a row, plus provenance. This is the
 // shape dashboards serialise into a per-model `pricing` block, so it stays
 // flat — the schedule is resolved before it gets here.
-export type ModelPrice = Rates & {
+export type ModelPrice = Rates & ModelLimits & {
   displayName?: string
   source: PriceSource
   /**
@@ -208,7 +225,7 @@ export interface PricePeriod extends RateCard {
   contextTiers?: ContextTier[]
 }
 
-export interface PriceSchedule {
+export interface PriceSchedule extends ModelLimits {
   displayName?: string
   source: PriceSource
   /** Which provider inside `source` quoted this. See `ModelPrice`. */

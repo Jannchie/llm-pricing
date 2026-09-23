@@ -30,6 +30,7 @@ export { sumEstimates } from './total'
 export type {
   ContextTier,
   CostEstimate,
+  ModelLimits,
   ModelPrice,
   NormalizedSchedule,
   PeakWindows,

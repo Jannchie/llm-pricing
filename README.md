@@ -53,6 +53,13 @@ const offline = new PricingCatalog({ sources: [] })
 
 Resolution order is **overrides → fast-tier derivation → live sources grafted onto the archive → archive**. A source that fails to load never takes the catalogue down; the previous load keeps serving and `state().status` degrades to `stale`.
 
+A price from a live catalogue also carries the model's size, since it is the same lookup: `contextWindowTokens` and `maxOutputTokens`, read from models.dev's `limit` or OpenRouter's `context_length`. The archive records no limits, so a card priced offline leaves both absent rather than guessing.
+
+```ts
+getPriceFor('gpt-6-luna')
+// { inputCostPerToken: 1e-7, ..., contextWindowTokens: 1_050_000, maxOutputTokens: 128_000 }
+```
+
 ### Why the archive is an archive
 
 Every catalogue in existence publishes one number per model: what it costs *today*. Multiply that by last month's tokens and a vendor's price rise silently inflates last month's bill.

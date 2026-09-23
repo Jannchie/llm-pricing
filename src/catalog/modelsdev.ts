@@ -1,4 +1,5 @@
 import type { ContextTier, PriceSchedule, Rates } from '../types'
+import { limitsFrom } from '../rates'
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json'
 
@@ -53,6 +54,7 @@ interface ModelsDevModel {
   id?: string
   name?: string
   cost?: ModelsDevCost
+  limit?: { context?: number, output?: number }
 }
 
 export type ModelsDevResponse = Record<string, {
@@ -298,6 +300,7 @@ export function parseModelsDev(json: ModelsDevResponse, options: ParseModelsDevO
         source: 'modelsdev',
         providerId,
         tier: rank.has(providerId) ? 0 : 1,
+        ...limitsFrom(model.limit?.context, model.limit?.output),
         periods: [{
           from: Number.NEGATIVE_INFINITY,
           rates,

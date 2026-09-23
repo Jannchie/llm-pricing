@@ -1,4 +1,4 @@
-import type { PricePeriod, PriceSchedule, RateCard, Rates } from './types'
+import type { ModelLimits, PricePeriod, PriceSchedule, RateCard, Rates } from './types'
 import { RATE_KEYS } from './types'
 
 export function scaleRates(rates: Rates, multiplier: number): Rates {
@@ -151,7 +151,7 @@ export function mergeLiveQuote(
   if (periodPricesEqual(latest, liveLatest)) {
     // The catalogue confirms what the archive already knew. Keep the
     // history, but credit the live source — it is what was consulted.
-    return { ...archive, displayName: live.displayName ?? archive.displayName, source: live.source, providerId: live.providerId }
+    return { ...archive, displayName: live.displayName ?? archive.displayName, source: live.source, providerId: live.providerId, ...limitsOf(live, archive) }
   }
   // Carried across whole: a tier is part of the quote, so grafting the base
   // rate while dropping the tier would price long requests at the new base.
@@ -169,8 +169,37 @@ export function mergeLiveQuote(
     displayName: live.displayName ?? archive.displayName,
     source: live.source,
     providerId: live.providerId,
+    ...limitsOf(live, archive),
     periods,
     sqlMatch: periods.length > 1 ? (archive.sqlMatch ?? sqlMatch) : undefined,
+  }
+}
+
+/**
+ * A catalogue's stated limits, keeping only numbers that could be one.
+ *
+ * Both sources publish these as loosely as they publish prices: models.dev has
+ * listings with a `limit.output` of 0 and OpenRouter has `null` for a model
+ * whose router picks the endpoint. A window of zero tokens would make every
+ * request an overflow, so anything that is not a positive whole count is
+ * treated as unstated rather than as a limit.
+ */
+export function limitsFrom(context: unknown, output: unknown): ModelLimits {
+  return { contextWindowTokens: tokenCount(context), maxOutputTokens: tokenCount(output) }
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * The limits a merged quote carries: the live catalogue's where it states them,
+ * since that is what is on offer today, and the archive's otherwise.
+ */
+function limitsOf(live: ModelLimits, archive: ModelLimits): ModelLimits {
+  return {
+    contextWindowTokens: live.contextWindowTokens ?? archive.contextWindowTokens,
+    maxOutputTokens: live.maxOutputTokens ?? archive.maxOutputTokens,
   }
 }
 
@@ -185,6 +214,9 @@ export function scaleSchedule(base: PriceSchedule, multiplier: number, displayNa
       : base.displayName,
     source: base.source,
     providerId: base.providerId,
+    // A fast variant is the same model served faster: same window, same cap.
+    contextWindowTokens: base.contextWindowTokens,
+    maxOutputTokens: base.maxOutputTokens,
     sqlMatch: base.sqlMatch,
     periods: base.periods.map(period => ({
       from: period.from,

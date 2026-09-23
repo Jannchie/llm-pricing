@@ -1,4 +1,5 @@
 import type { PriceSchedule } from '../types'
+import { limitsFrom } from '../rates'
 
 export const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models'
 
@@ -86,6 +87,12 @@ export function parseOpenRouterModels(json: OpenRouterModelsResponse): Map<strin
       // OpenRouter's ids are always `vendor/model`, so the prefix names the
       // vendor whose endpoint it would route to.
       providerId: slash > 0 ? key.slice(0, slash) : undefined,
+      // The completion cap is only stated per endpoint, and `top_provider` is
+      // the one OpenRouter routes to first.
+      ...limitsFrom(
+        model.context_length,
+        (model.top_provider as Record<string, unknown> | undefined)?.max_completion_tokens,
+      ),
       periods: [{
         from: Number.NEGATIVE_INFINITY,
         rates: {

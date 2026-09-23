@@ -687,6 +687,8 @@ export class PricingCatalog {
       displayName: schedule.displayName,
       source: schedule.source,
       providerId: schedule.providerId,
+      contextWindowTokens: schedule.contextWindowTokens,
+      maxOutputTokens: schedule.maxOutputTokens,
       // Safe to memoise on the rates object even though these are further
       // keys: every variant card is a distinct object owned by exactly one
       // tier and one mode, so a given `Rates` can never be reached twice.
