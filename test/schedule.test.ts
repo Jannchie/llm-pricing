@@ -27,6 +27,13 @@ const WINDOWS: Array<[number, number]> = [[1, 4], [6, 10]]
 const PEAK = { windowsUtc: WINDOWS }
 const WEEKDAY_PEAK = { windowsUtc: WINDOWS, daysUtc: [1, 2, 3, 4, 5] }
 const CUTOVER = Date.UTC(2026, 7, 16, 16, 0, 0)
+// Thu 2026-10-01 and Fri 10-02 excepted, plus Sat 10-03, which the weekday
+// rule already skips and so must not be taken away a second time.
+const HOLIDAY_PEAK = {
+  windowsUtc: WINDOWS,
+  daysUtc: [1, 2, 3, 4, 5],
+  exceptDaysUtc: [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 2), Date.UTC(2026, 9, 3)].map(ms => ms / DAY_MS),
+}
 
 // Built the way production builds them: these primitives now accept only a
 // schedule that has been through the gate, so the fixtures go through it too
@@ -123,6 +130,13 @@ describe('ispeakhour', () => {
     }
   })
 
+  it('skips excepted days', () => {
+    expect(isPeakHour(HOLIDAY_PEAK, Date.UTC(2026, 8, 30, 2))).toBe(true)
+    expect(isPeakHour(HOLIDAY_PEAK, Date.UTC(2026, 9, 1, 2))).toBe(false)
+    expect(isPeakHour(HOLIDAY_PEAK, Date.UTC(2026, 9, 2, 7))).toBe(false)
+    expect(isPeakHour(HOLIDAY_PEAK, Date.UTC(2026, 9, 5, 2))).toBe(true)
+  })
+
   it('picks the same weekdays before the epoch', () => {
     // 1969-12-29 was a Monday, 1970-01-03 a Saturday.
     expect(isPeakHour(WEEKDAY_PEAK, Date.UTC(1969, 11, 29, 2))).toBe(true)
@@ -198,6 +212,25 @@ describe('peakmsbetween', () => {
     const monday = Date.UTC(2026, 7, 24)
     expect(peakMsBetween({ windowsUtc: [[1, 4]], daysUtc: [1, 1, 1] }, monday, monday + 7 * DAY_MS))
       .toBe(3 * HOUR_MS)
+  })
+
+  it('matches an hour-by-hour walk with excepted days', () => {
+    for (const [from, to] of [
+      [Date.UTC(2026, 8, 1), Date.UTC(2026, 10, 1)],
+      [Date.UTC(2026, 9, 1, 2), Date.UTC(2026, 9, 5, 3)],
+      [Date.UTC(2026, 9, 2, 12), Date.UTC(2026, 9, 2, 13)],
+      [Date.UTC(2026, 9, 6), Date.UTC(2026, 9, 20, 7)],
+    ] as Array<[number, number]>) {
+      expect(peakMsBetween(HOLIDAY_PEAK, from, to), `${from}..${to}`)
+        .toBe(brute(HOLIDAY_PEAK, from, to))
+    }
+  })
+
+  it('does not subtract a repeated excepted day twice', () => {
+    const day = Date.UTC(2026, 9, 1) / DAY_MS
+    const peak = { windowsUtc: WINDOWS, exceptDaysUtc: [day, day] }
+    const monday = Date.UTC(2026, 8, 28)
+    expect(peakMsBetween(peak, monday, monday + 7 * DAY_MS)).toBe(6 * 7 * HOUR_MS)
   })
 
   it('counts no peak hours across a whole weekend', () => {

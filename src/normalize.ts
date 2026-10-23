@@ -106,6 +106,7 @@ export function normalizeSchedule(
     }
     const windowsUtc = normalizeWindows(period.peak.windowsUtc)
     const daysUtc = normalizeDays(period.peak.daysUtc)
+    const exceptDaysUtc = normalizeExceptDays(period.peak.exceptDaysUtc)
     // Every window was nonsense, or no weekday survived: either way the
     // period simply has no peak — which also means its tiers are no longer in
     // conflict and can be kept.
@@ -121,7 +122,7 @@ export function normalizeSchedule(
       // the source wrote its fields in: `cardFor` reads `peak.daysUtc` and
       // `peak.rates` once per priced row, and two shapes make those loads
       // polymorphic.
-      : normalizeTiers({ ...period, peak: { windowsUtc, daysUtc, rates: period.peak.rates } }, onWarn, id)
+      : normalizeTiers({ ...period, peak: { windowsUtc, daysUtc, exceptDaysUtc, rates: period.peak.rates } }, onWarn, id)
   })
 
   // The first period must open at -Infinity. `periodAt` already falls back
@@ -267,6 +268,15 @@ function normalizeWindows(windows: Array<[number, number]>): Array<[number, numb
  * written in. The blend arithmetic counts its own distinct days rather than
  * relying on that, so a duplicate is a tidiness problem, not a pricing one.
  */
+/** Excepted whole UTC days, deduplicated and sorted; none at all is `undefined`. */
+function normalizeExceptDays(days: number[] | undefined): number[] | undefined {
+  if (days === undefined) {
+    return undefined
+  }
+  const seen = new Set(days.filter(day => Number.isInteger(day)))
+  return seen.size === 0 ? undefined : [...seen].sort((a, b) => a - b)
+}
+
 function normalizeDays(days: number[] | undefined): number[] | undefined {
   if (days === undefined) {
     return undefined

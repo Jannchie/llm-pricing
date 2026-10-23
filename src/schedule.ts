@@ -112,18 +112,23 @@ function weekdayOf(dayIndex: number): number {
 }
 
 /**
- * Whether a day carries the peak windows at all. `daysUtc` absent means
+ * Whether a day's weekday carries the peak windows. `daysUtc` absent means
  * every day does — the shape every vendor but DeepSeek publishes.
  */
-function isPeakDay(daysUtc: number[] | undefined, dayIndex: number): boolean {
+function isPeakWeekday(daysUtc: number[] | undefined, dayIndex: number): boolean {
   return daysUtc === undefined || daysUtc.includes(weekdayOf(dayIndex))
+}
+
+/** Whether a day carries the peak windows at all: its weekday does and it is not excepted. */
+function isPeakDay(peak: PeakWindows, dayIndex: number): boolean {
+  return isPeakWeekday(peak.daysUtc, dayIndex) && !(peak.exceptDaysUtc?.includes(dayIndex) ?? false)
 }
 
 export function isPeakHour(peak: PeakWindows, atMs: number): boolean {
   // Epoch ms floors to UTC midnight without any timezone lookup, which is
   // exactly what the windows are defined against.
   const dayIndex = Math.floor(atMs / DAY_MS)
-  if (!isPeakDay(peak.daysUtc, dayIndex)) {
+  if (!isPeakDay(peak, dayIndex)) {
     return false
   }
   const hour = Math.floor((atMs - dayIndex * DAY_MS) / HOUR_MS)
@@ -217,20 +222,30 @@ interface DayCount {
  * Everything the prefix sum needs about one boundary: whole weeks contribute
  * their peak days each, leaving at most six days to walk.
  */
-function dayCountAt(x: number, daysUtc: number[] | undefined): DayCount {
+function dayCountAt(x: number, peak: PeakWindows): DayCount {
+  const { daysUtc } = peak
   const days = Math.floor(x / DAY_MS)
   const intoDay = x - days * DAY_MS
-  if (daysUtc === undefined) {
-    return { peakDaysBefore: days, intoDay, counts: true }
-  }
-  const weeks = Math.floor(days / 7)
-  let count = weeks * peakDaysPerWeek(daysUtc)
-  for (let day = weeks * 7; day < days; day++) {
-    if (isPeakDay(daysUtc, day)) {
-      count++
+  let count = days
+  if (daysUtc !== undefined) {
+    const weeks = Math.floor(days / 7)
+    count = weeks * peakDaysPerWeek(daysUtc)
+    for (let day = weeks * 7; day < days; day++) {
+      if (isPeakWeekday(daysUtc, day)) {
+        count++
+      }
     }
   }
-  return { peakDaysBefore: count, intoDay, counts: isPeakDay(daysUtc, days) }
+  // An excepted day only takes away a day the weekday rule had counted. A
+  // `Set` rather than the array as given, for the same reason
+  // `peakDaysPerWeek` counts: a caller passing a duplicate must not subtract
+  // the same holiday twice.
+  for (const day of new Set(peak.exceptDaysUtc)) {
+    if (day < days && isPeakWeekday(daysUtc, day)) {
+      count--
+    }
+  }
+  return { peakDaysBefore: count, intoDay, counts: isPeakDay(peak, days) }
 }
 
 /**
@@ -365,8 +380,8 @@ function unruledOutCards(period: PricePeriod, facts: RequestFacts): Rates[] | un
  * taken once rather than per window.
  */
 export function peakMsBetween(peak: PeakWindows, fromMs: number, toMs: number): number {
-  const start = dayCountAt(fromMs, peak.daysUtc)
-  const end = dayCountAt(toMs, peak.daysUtc)
+  const start = dayCountAt(fromMs, peak)
+  const end = dayCountAt(toMs, peak)
   let total = 0
   for (const [from, to] of peak.windowsUtc) {
     const startMs = from * HOUR_MS

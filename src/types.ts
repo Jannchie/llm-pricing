@@ -204,6 +204,14 @@ export interface PeakWindows {
    * vendor — the failure is silent and per-instant.
    */
   daysUtc?: number[]
+  /**
+   * Whole UTC days (`Math.floor(ms / 86_400_000)`) the windows skip even when
+   * their weekday is in `daysUtc`; absent means none. DeepSeek bills the
+   * off-peak rate all day on Chinese public holidays. Same precondition as
+   * `daysUtc`: a UTC day stands for the vendor's local one only while no
+   * window crosses a UTC midnight.
+   */
+  exceptDaysUtc?: number[]
 }
 
 // One contiguous slice of a model's price history. `rates` is the flat
