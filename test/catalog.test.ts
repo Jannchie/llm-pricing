@@ -130,6 +130,36 @@ describe('pricingcatalog overrides', () => {
     expect(oldSaturday!.inputCostPerToken).toBeCloseTo(0.44 / 1e6, 15)
   })
 
+  it('bills deepseek-flash on the weekday peak schedule', () => {
+    // 2026-10-23 is a Friday, 2026-10-24 the Saturday after it.
+    const peak = catalog.getPrice('deepseek-flash', Date.UTC(2026, 9, 23, 2))
+    const offPeak = catalog.getPrice('deepseek-flash', Date.UTC(2026, 9, 23, 12))
+    const saturday = catalog.getPrice('deepseek-flash', Date.UTC(2026, 9, 24, 2))
+    expect(peak?.source).toBe('override')
+    expect(peak!.inputCostPerToken).toBeCloseTo(0.3 / 1e6, 15)
+    expect(peak!.outputCostPerToken).toBeCloseTo(1.2 / 1e6, 15)
+    expect(peak!.cacheReadInputCostPerToken).toBeCloseTo(0.006 / 1e6, 15)
+    expect(offPeak!.inputCostPerToken).toBeCloseTo(0.15 / 1e6, 15)
+    expect(saturday!.inputCostPerToken).toBeCloseTo(0.15 / 1e6, 15)
+  })
+
+  it('bills chinese public holidays off-peak all day', () => {
+    // Thursday 2026-10-01 (National Day) against Thursday 2026-10-08.
+    for (const model of ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro']) {
+      const holiday = catalog.getPrice(model, Date.UTC(2026, 9, 1, 2))
+      const workday = catalog.getPrice(model, Date.UTC(2026, 9, 8, 2))
+      expect(workday!.inputCostPerToken, model).toBeCloseTo(holiday!.inputCostPerToken * 2, 15)
+    }
+  })
+
+  it('bills the legacy deepseek-v4-flash id at the flash 1017 price from its launch', () => {
+    const before = catalog.getPrice('deepseek-v4-flash', Date.UTC(2026, 9, 16, 12))
+    const after = catalog.getPrice('deepseek-v4-flash', Date.UTC(2026, 9, 17, 12))
+    expect(before!.inputCostPerToken).toBeCloseTo(0.22 / 1e6, 15)
+    expect(after!.inputCostPerToken).toBeCloseTo(0.15 / 1e6, 15)
+    expect(after!.cacheReadInputCostPerToken).toBeCloseTo(0.003 / 1e6, 15)
+  })
+
   it('exposes the sql patterns for every time-sensitive schedule', () => {
     expect(catalog.timeSensitiveSqlPatterns()).toEqual(['%deepseek%'])
   })

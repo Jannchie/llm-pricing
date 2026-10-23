@@ -39,6 +39,28 @@ const DEEPSEEK_WEEKEND_OFF_PEAK_FROM_MS = Date.UTC(2026, 7, 22, 16, 0, 0)
 // anywhere the windows can apply.
 const DEEPSEEK_PEAK_DAYS_UTC = [1, 2, 3, 4, 5]
 
+// Chinese public holidays that fall on a weekday, billed off-peak all day.
+// Weekend make-up workdays (调休) stay off-peak: the rule is weekdays only.
+// Source: State Council notice on the 2026 holidays (2025-11-04). Only days
+// on or after the peak schedule's start matter; extend this list when the
+// next year's notice is published.
+const DEEPSEEK_HOLIDAYS = [
+  // Mid-Autumn Festival
+  '2026-09-25',
+  // National Day
+  '2026-10-01',
+  '2026-10-02',
+  '2026-10-05',
+  '2026-10-06',
+  '2026-10-07',
+]
+const DEEPSEEK_HOLIDAY_DAYS_UTC = DEEPSEEK_HOLIDAYS.map(date => Date.parse(`${date}T00:00:00Z`) / 86_400_000)
+
+// 00:00 Beijing on 2026-10-17: DeepSeek-V4.1-Flash-1017 replaced V4 Flash.
+// The new id is `deepseek-flash`; `deepseek-v4-flash` is still accepted but
+// served by the same model and billed at its price.
+const DEEPSEEK_FLASH_1017_FROM_MS = Date.UTC(2026, 9, 16, 16, 0, 0)
+
 // DeepSeek publishes three prices per model — cache hit, cache miss and
 // output, in $/MTok. There is deliberately no cache-*write* price: writing
 // the context cache is free, and the tokens that missed are billed at the
@@ -75,10 +97,22 @@ function deepseekPeakPeriods(offPeak: Rates, peak: Rates): PricePeriod[] {
     {
       ...weekdaysAndWeekends,
       from: DEEPSEEK_WEEKEND_OFF_PEAK_FROM_MS,
-      peak: { ...weekdaysAndWeekends.peak!, daysUtc: DEEPSEEK_PEAK_DAYS_UTC },
+      peak: { ...weekdaysAndWeekends.peak!, daysUtc: DEEPSEEK_PEAK_DAYS_UTC, exceptDaysUtc: DEEPSEEK_HOLIDAY_DAYS_UTC },
     },
   ]
 }
+
+/** One weekday-only peak schedule period, the shape DeepSeek bills today. */
+function deepseekWeekdayPeakPeriod(from: number, offPeak: Rates, peak: Rates): PricePeriod {
+  return {
+    from,
+    rates: offPeak,
+    peak: { windowsUtc: DEEPSEEK_PEAK_WINDOWS_UTC, daysUtc: DEEPSEEK_PEAK_DAYS_UTC, exceptDaysUtc: DEEPSEEK_HOLIDAY_DAYS_UTC, rates: peak },
+  }
+}
+
+const DEEPSEEK_FLASH_1017_OFF_PEAK = deepseekRates(0.003, 0.15, 0.6)
+const DEEPSEEK_FLASH_1017_PEAK = deepseekRates(0.006, 0.3, 1.2)
 
 const DEEPSEEK_SQL_MATCH = ['%deepseek%']
 
@@ -90,6 +124,17 @@ export const OVERRIDES: Record<string, PriceSchedule> = {
     periods: [
       { from: Number.NEGATIVE_INFINITY, rates: deepseekRates(0.0028, 0.14, 0.28) },
       ...deepseekPeakPeriods(deepseekRates(0.007, 0.22, 0.66), deepseekRates(0.014, 0.44, 1.32)),
+      deepseekWeekdayPeakPeriod(DEEPSEEK_FLASH_1017_FROM_MS, DEEPSEEK_FLASH_1017_OFF_PEAK, DEEPSEEK_FLASH_1017_PEAK),
+    ],
+  },
+  // Without its own entry this id fell through to models.dev, which quotes
+  // one (off-peak) rate around the clock: every peak call billed at half.
+  'deepseek-flash': {
+    displayName: 'DeepSeek V4.1 Flash',
+    source: 'override',
+    sqlMatch: DEEPSEEK_SQL_MATCH,
+    periods: [
+      deepseekWeekdayPeakPeriod(Number.NEGATIVE_INFINITY, DEEPSEEK_FLASH_1017_OFF_PEAK, DEEPSEEK_FLASH_1017_PEAK),
     ],
   },
   'deepseek-v4-pro': {
